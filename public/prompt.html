@@ -1,0 +1,699 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NAI 提词器</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #fff; --text: #1f2328; --muted: #6b7280; --border: #e5e7eb;
+    --accent: #2563eb; --accent-weak: #eef3ff; --err: #dc2626; --radius: 10px;
+    --cat-0: #2563eb; --cat-1: #c2410c; --cat-3: #7c3aed; --cat-4: #15803d; --cat-5: #b45309;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #181b21; --text: #e6e8eb; --muted: #9aa1ab; --border: #2a2f37;
+      --accent: #5b8cff; --accent-weak: #1d2740; --err: #f87171;
+      --cat-0: #6ea8ff; --cat-1: #ff8a65; --cat-3: #b794f6; --cat-4: #4ade80; --cat-5: #fbbf24;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+           min-height: 56px; padding: 8px 20px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { margin: 0; font-size: 16px; }
+  header .sub { color: var(--muted); font-size: 12px; }
+  main { max-width: 1280px; margin: 0 auto; padding: 16px 20px 40px; }
+  .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+  .col { display: grid; gap: 16px; min-width: 0; }
+  .panel { padding: 16px; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); min-width: 0; }
+  h2 { display: flex; align-items: center; gap: 8px; margin: 0 0 10px; font-size: 15px; }
+  h2 .count { color: var(--muted); font-size: 12px; font-weight: 400; }
+  h3 { margin: 14px 0 8px; font-size: 13px; color: var(--muted); font-weight: 500; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .spacer { flex: 1; }
+  .hint { margin: 6px 0 0; color: var(--muted); font-size: 12px; }
+  .muted { color: var(--muted); }
+  .err-text { color: var(--err); }
+  input, select, textarea { padding: 6px 8px; font: inherit; color: inherit; background: var(--bg);
+                            border: 1px solid var(--border); border-radius: 6px; min-width: 0; }
+  textarea { display: block; width: 100%; resize: vertical; }
+  textarea.mono { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+  input[type="search"] { width: 100%; }
+  button { padding: 6px 12px; font: inherit; color: var(--text); background: var(--panel);
+           border: 1px solid var(--border); border-radius: 6px; cursor: pointer; white-space: nowrap; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.small { padding: 2px 8px; font-size: 12px; }
+  button.link { padding: 2px 4px; border: none; background: none; color: var(--accent); }
+  button:disabled { opacity: .5; cursor: default; }
+  label.check { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 13px; }
+
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip { display: inline-flex; align-items: center; gap: 4px; max-width: 100%; padding: 2px 10px 2px 8px;
+          font-size: 13px; background: var(--bg); border: 1px solid var(--border); border-radius: 999px; cursor: pointer; }
+  .chip:hover { border-color: var(--accent); }
+  .chip .cn { color: var(--muted); font-size: 12px; }
+  .chip.off { opacity: .45; text-decoration: line-through; }
+  .dot { flex: none; width: 8px; height: 8px; border-radius: 50%; background: var(--cat-0); }
+  .c1 .dot, .dot.c1 { background: var(--cat-1); } .c3 .dot, .dot.c3 { background: var(--cat-3); }
+  .c4 .dot, .dot.c4 { background: var(--cat-4); } .c5 .dot, .dot.c5 { background: var(--cat-5); }
+  .empty { padding: 10px 0; color: var(--muted); font-size: 13px; }
+
+  .tabs { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+  .tabs button { padding: 3px 10px; border-radius: 999px; font-size: 13px; color: var(--muted); }
+  .tabs button.active { background: var(--accent-weak); border-color: var(--accent); color: var(--accent); }
+
+  .results { max-height: 360px; overflow-y: auto; margin-top: 10px; border-top: 1px solid var(--border); }
+  .result { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 8px; align-items: center;
+            padding: 6px 4px; border-bottom: 1px solid var(--border); cursor: pointer; }
+  .result:hover { background: var(--accent-weak); }
+  .result .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .result .cn { color: var(--muted); font-size: 12px; }
+  .result .meta { color: var(--muted); font-size: 12px; text-align: right; white-space: nowrap; }
+
+  .workspace { display: flex; flex-wrap: wrap; gap: 6px; min-height: 40px; padding: 8px;
+               background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; }
+  .wchip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px 2px 8px; font-size: 13px;
+           background: var(--panel); border: 1px solid var(--border); border-radius: 999px; cursor: grab; }
+  .wchip.dragging { opacity: .4; }
+  .wchip .w { min-width: 30px; color: var(--accent); font-size: 12px; text-align: center; font-variant-numeric: tabular-nums; }
+  .wchip button { padding: 0 5px; line-height: 18px; border: none; background: none; color: var(--muted); }
+  .wchip button:hover { color: var(--accent); }
+
+  .gen-result { margin-top: 12px; }
+  .gen-result img { display: block; max-width: 100%; max-height: 640px; margin-top: 8px; border-radius: 8px; border: 1px solid var(--border); }
+  .fav { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+  .fav .text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+
+  #toast { position: fixed; left: 50%; bottom: 24px; z-index: 20; transform: translateX(-50%); padding: 8px 16px;
+           border-radius: 8px; background: #111827; color: #fff; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.show { opacity: .95; }
+  #toast.err { background: var(--err); }
+  @media (max-width: 860px) {
+    header { padding: 8px 12px; }
+    main { padding: 12px 12px 32px; }
+    .layout { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>NAI 提词器</h1>
+  <span class="sub">中文描述转 Danbooru 标签 · 查标签 · 关联推荐 · 推荐画师</span>
+  <span class="spacer"></span>
+  <label class="check"><input type="checkbox" id="nsfw"> 显示 NSFW 标签</label>
+</header>
+
+<main class="layout">
+  <div class="col">
+    <section class="panel">
+      <h2>① 用中文描述画面</h2>
+      <textarea id="describe-input" rows="3" placeholder="例如：一个穿着白色水手服的双马尾少女在雨中奔跑，流着泪"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="describe-btn">转成标签</button>
+        <button id="ai-btn" hidden title="用 AI 把整段描述改写成标签，需要在下面“试生成”里填调用密钥">AI 优化</button>
+        <span class="hint" style="margin:0">用逗号、顿号分开的词会当成独立概念；英文标签会顺便纠正拼写和旧写法</span>
+      </div>
+      <div id="describe-result" hidden>
+        <h3>点一下可以去掉不要的，再加入已选</h3>
+        <div class="chips" id="describe-chips"></div>
+        <p class="hint" id="describe-unmatched"></p>
+        <div class="row" style="margin-top:8px"><button id="describe-add">加入已选</button></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>② 查标签</h2>
+      <input type="search" id="search-input" placeholder="输入中文或英文，比如 水手服、猫耳、twin、blue hair" autocomplete="off">
+      <div class="tabs" id="search-cats" style="margin:8px 0 0">
+        <button data-cat="" class="active">全部</button>
+        <button data-cat="0">通用</button>
+        <button data-cat="4">角色</button>
+        <button data-cat="3">作品</button>
+        <button data-cat="1">画师</button>
+      </div>
+      <div class="results" id="search-results"><div class="empty">输入后自动搜索，点一行加入已选。悬停可看中文释义。</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>③ 常用预设</h2>
+      <div class="tabs" id="preset-tabs"></div>
+      <div class="chips" id="preset-chips"></div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="panel">
+      <h2>已选标签 <span class="count" id="selected-count"></span><span class="spacer"></span>
+        <button class="small" id="undo-btn">撤销</button><button class="small" id="clear-btn">清空</button>
+      </h2>
+      <div class="workspace" id="workspace"></div>
+      <p class="hint">拖动调整顺序；− / + 调权重；越靠前、权重越高，对画面影响越大。</p>
+
+      <h3>正面提示词</h3>
+      <textarea class="mono" id="prompt-out" rows="4" readonly></textarea>
+      <div class="row" style="margin-top:8px">
+        <label class="check">质量词 <select id="quality"></select></label>
+        <label class="check">权重写法 <select id="weight-format">
+          <option value="auto">按模型自动</option>
+          <option value="number">数字 1.2::标签::（NAI4 及以上）</option>
+          <option value="brace">花括号 {标签}（NAI3）</option>
+        </select></label>
+        <span class="spacer"></span>
+        <button id="copy-prompt">复制</button>
+      </div>
+
+      <h3>负面提示词</h3>
+      <textarea class="mono" id="negative" rows="3" placeholder="留空则用上游默认的负面提示词"></textarea>
+      <div class="row" style="margin-top:8px">
+        <label class="check">预设 <select id="negative-preset"><option value="">选择后填入…</option></select></label>
+        <span class="spacer"></span>
+        <button id="copy-negative">复制</button>
+        <button id="save-fav">收藏当前</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>关联推荐 <span class="count">经常和已选标签一起出现的</span></h2>
+      <div class="chips" id="related"><div class="empty">先加几个标签</div></div>
+      <h3>推荐画师 <span class="muted">擅长画已选内容的画师，加入后是 artist:名字</span></h3>
+      <div class="chips" id="artists"><div class="empty">先加几个标签</div></div>
+    </section>
+
+    <section class="panel">
+      <h2>试生成</h2>
+      <div class="row">
+        <input type="password" id="sk" placeholder="调用密钥 sk-…" autocomplete="off" style="flex:1; min-width:200px">
+        <label class="check"><input type="checkbox" id="remember-sk"> 记住（存在本浏览器）</label>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label class="check">模型 <select id="model"></select></label>
+        <label class="check">比例 <select id="ratio">
+          <option value="832x1216">竖图 2:3</option>
+          <option value="1216x832">横图 3:2</option>
+          <option value="1024x1024">方图 1:1</option>
+          <option value="768x1344">手机竖屏 9:16</option>
+          <option value="1344x768">宽屏 16:9</option>
+        </select></label>
+        <span class="spacer"></span>
+        <button class="primary" id="generate-btn">生成</button>
+      </div>
+      <p class="hint">每生成一张都会真实扣点。密钥向管理员要。</p>
+      <div class="gen-result" id="gen-result"></div>
+    </section>
+
+    <section class="panel">
+      <h2>收藏 <span class="count" id="fav-count"></span></h2>
+      <div id="favorites"><div class="empty">还没有收藏</div></div>
+      <p class="hint">收藏、已选标签只存在本浏览器里。</p>
+    </section>
+  </div>
+</main>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+
+const $ = (selector) => document.querySelector(selector);
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+const fmtNum = (n) => Number(n || 0).toLocaleString('zh-CN');
+
+// 本地存储读写都可能失败（隐私模式等），失败就当没有
+const store = {
+  get(key, fallback) {
+    try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch { return fallback; }
+  },
+  set(key, value) { try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* 不记住 */ } },
+  remove(key) { try { localStorage.removeItem(key); } catch { /* 忽略 */ } },
+};
+
+const state = {
+  selected: [], negative: '', quality: '', weightFormat: 'auto', model: '', ratio: '832x1216', nsfw: false,
+  ...store.get('naiPrompt.workspace', {}),
+};
+let favorites = store.get('naiPrompt.favorites', []);
+const undoStack = [];
+let presets = { groups: [], quality: [], negative: [] };
+let describeResult = [];
+let searchCat = '';
+
+let toastTimer;
+function toast(message, isError = false) {
+  const el = $('#toast');
+  el.textContent = message;
+  el.className = `show${isError ? ' err' : ''}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.className = ''), isError ? 4000 : 1800);
+}
+
+async function api(method, path, body) {
+  const res = await fetch(`/prompt/api${path}`, {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error?.message || `HTTP ${res.status}`);
+  return data;
+}
+
+const run = (fn) => async (event) => {
+  const button = event?.currentTarget instanceof HTMLButtonElement ? event.currentTarget : null;
+  if (button) button.disabled = true;
+  try { await fn(event); } catch (err) { toast(err.message, true); } finally { if (button) button.disabled = false; }
+};
+
+const debounce = (fn, ms) => {
+  let timer;
+  return (...args) => { clearTimeout(timer); timer = setTimeout(() => fn(...args), ms); };
+};
+
+const chip = (item, extra = '') =>
+  `<span class="chip c${item.cat ?? 0} ${extra}" title="${esc(item.wiki || item.cn || '')}"><span class="dot"></span>` +
+  `${esc(item.text)}${item.cn ? ` <span class="cn">${esc(item.cn)}</span>` : ''}</span>`;
+
+// ---------- 已选标签 ----------
+
+function save() { store.set('naiPrompt.workspace', state); }
+
+function snapshot() {
+  undoStack.push(JSON.stringify(state.selected));
+  if (undoStack.length > 50) undoStack.shift();
+}
+
+/**
+ * items：[{ text, name, cn, cat, whole? }]；text 是写进提示词的样子，可能含逗号（预设里的“1girl, 1boy”会拆开，
+ * AI 写的自然语言短句带 whole，整句保留）
+ */
+function addTags(items) {
+  const flat = items.flatMap((it) => !it.whole && it.text.includes(',')
+    ? it.text.split(',').map((t) => t.trim()).filter(Boolean).map((t) => ({ text: t, name: t, cn: '', cat: 0 }))
+    : [it]);
+  snapshot();
+  let added = 0;
+  for (const it of flat) {
+    if (state.selected.some((s) => s.text === it.text)) continue;
+    state.selected.push({ text: it.text, name: it.name ?? it.text, cn: it.cn ?? '', cat: it.cat ?? 0, weight: 1 });
+    added++;
+  }
+  if (!added) {
+    undoStack.pop();
+    toast('已经在已选里了');
+    return;
+  }
+  renderWorkspace();
+  toast(`已加入 ${added} 个`);
+}
+
+function weightFormat() {
+  if (state.weightFormat !== 'auto') return state.weightFormat;
+  return /(diffusion|furry)-3$/.test(state.model) ? 'brace' : 'number';
+}
+
+function formatTag(item) {
+  const w = Math.round(item.weight * 100) / 100;
+  if (w === 1) return item.text;
+  if (weightFormat() === 'brace') {
+    const n = Math.round(Math.log(w) / Math.log(1.05));
+    if (!n) return item.text;
+    return n > 0 ? '{'.repeat(n) + item.text + '}'.repeat(n) : '['.repeat(-n) + item.text + ']'.repeat(-n);
+  }
+  return `${w}::${item.text}::`;
+}
+
+const buildPrompt = () => [...state.selected.map(formatTag), state.quality].filter(Boolean).join(', ');
+
+function renderWorkspace() {
+  const ws = $('#workspace');
+  ws.innerHTML = state.selected.length
+    ? state.selected.map((s, i) => `
+      <span class="wchip c${s.cat}" draggable="true" data-i="${i}" title="${esc(s.cn)}">
+        <span class="dot"></span>${esc(s.text)}${s.cn ? ` <span class="muted" style="font-size:12px">${esc(s.cn)}</span>` : ''}
+        <button data-act="down" title="降低权重">−</button><span class="w">${s.weight === 1 ? '1' : s.weight.toFixed(1)}</span>
+        <button data-act="up" title="提高权重">+</button><button data-act="del" title="移除">×</button>
+      </span>`).join('')
+    : '<span class="empty">还没有标签：用左边的转换、查词或预设加进来</span>';
+  $('#selected-count').textContent = state.selected.length ? `${state.selected.length} 个` : '';
+  $('#prompt-out').value = buildPrompt();
+  $('#undo-btn').disabled = !undoStack.length;
+  save();
+  refreshRecommend();
+}
+
+$('#workspace').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-act]');
+  const chipEl = event.target.closest('.wchip');
+  if (!button || !chipEl) return;
+  const item = state.selected[Number(chipEl.dataset.i)];
+  snapshot();
+  if (button.dataset.act === 'del') state.selected.splice(Number(chipEl.dataset.i), 1);
+  else item.weight = Math.min(3, Math.max(0.1, Math.round((item.weight + (button.dataset.act === 'up' ? 0.1 : -0.1)) * 10) / 10));
+  renderWorkspace();
+});
+
+// 拖动排序
+let dragIndex = null;
+$('#workspace').addEventListener('dragstart', (event) => {
+  const chipEl = event.target.closest('.wchip');
+  if (!chipEl) return;
+  dragIndex = Number(chipEl.dataset.i);
+  chipEl.classList.add('dragging');
+  event.dataTransfer.effectAllowed = 'move';
+});
+$('#workspace').addEventListener('dragover', (event) => { if (dragIndex !== null) event.preventDefault(); });
+$('#workspace').addEventListener('drop', (event) => {
+  event.preventDefault();
+  const target = event.target.closest('.wchip');
+  if (dragIndex === null) return;
+  const to = target ? Number(target.dataset.i) : state.selected.length - 1;
+  if (to !== dragIndex) {
+    snapshot();
+    const [moved] = state.selected.splice(dragIndex, 1);
+    state.selected.splice(to, 0, moved);
+  }
+  dragIndex = null;
+  renderWorkspace();
+});
+$('#workspace').addEventListener('dragend', () => { dragIndex = null; renderWorkspace(); });
+
+$('#undo-btn').addEventListener('click', () => {
+  const prev = undoStack.pop();
+  if (prev === undefined) return;
+  state.selected = JSON.parse(prev);
+  renderWorkspace();
+});
+$('#clear-btn').addEventListener('click', () => {
+  if (!state.selected.length) return;
+  snapshot();
+  state.selected = [];
+  renderWorkspace();
+});
+
+async function copy(text) {
+  if (!text) return toast('没有内容可复制', true);
+  try { await navigator.clipboard.writeText(text); toast('已复制'); } catch { toast('复制失败，请手动选中复制', true); }
+}
+$('#copy-prompt').addEventListener('click', () => copy($('#prompt-out').value));
+$('#copy-negative').addEventListener('click', () => copy($('#negative').value));
+
+$('#quality').addEventListener('change', (e) => { state.quality = e.target.value; renderWorkspace(); });
+$('#weight-format').addEventListener('change', (e) => { state.weightFormat = e.target.value; renderWorkspace(); });
+$('#negative').addEventListener('input', debounce((e) => { state.negative = e.target.value; save(); }, 300));
+$('#negative-preset').addEventListener('change', (e) => {
+  if (!e.target.value) return;
+  $('#negative').value = state.negative = e.target.value;
+  e.target.value = '';
+  save();
+});
+
+// ---------- ① 中文描述转标签 ----------
+
+$('#describe-btn').addEventListener('click', run(async () => {
+  const text = $('#describe-input').value.trim();
+  if (!text) throw new Error('先写一句描述');
+  const { tags, unmatched, fixes } = await api('POST', '/convert', { text, nsfw: state.nsfw });
+  describeResult = tags.map((t) => ({ ...t, on: true }));
+  $('#describe-result').hidden = false;
+  renderDescribe();
+  $('#describe-unmatched').textContent = [
+    fixes.length ? `已修正：${fixes.map((f) => `${f.from} → ${f.to}`).join('，')}` : '',
+    unmatched.length ? `没认出来的：${unmatched.join('、')}（可以换个说法，或者到“查标签”里搜）` : '',
+  ].filter(Boolean).join('　');
+}));
+
+// AI 优化：要花钱，带上“试生成”里填的调用密钥
+$('#ai-btn').addEventListener('click', run(async () => {
+  const text = $('#describe-input').value.trim();
+  if (!text) throw new Error('先写一句描述');
+  const sk = $('#sk').value.trim();
+  if (!sk) throw new Error('AI 优化需要调用密钥：先在下面“试生成”里填 sk');
+  // 管理员可以只对部分模型开放 AI 优化（空 = 所有模型）
+  if (presets.ai_models?.length && !presets.ai_models.includes(state.model)) {
+    throw new Error(`模型 ${state.model} 没有开启 AI 优化：在下面“试生成”里换个模型，或者用“转成标签”`);
+  }
+  const res = await fetch('/prompt/api/ai', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sk}` },
+    body: JSON.stringify({ text, nsfw: state.nsfw, model: state.model }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error?.message || `HTTP ${res.status}`);
+  if ($('#remember-sk').checked) store.set('naiPrompt.sk', sk);
+  describeResult = data.tags.map((t) => ({ ...t, on: true }));
+  // NAI4+ 时 AI 还会写几句位置、互动、光照的描述，整句作为一项
+  if (data.sentences) {
+    describeResult.push({ text: data.sentences, name: data.sentences, cn: '画面描述', cat: 0, whole: true, on: true });
+  }
+  $('#describe-result').hidden = false;
+  renderDescribe();
+  $('#describe-unmatched').textContent = 'AI 优化的结果，点一下可以去掉不要的。';
+}));
+
+function renderDescribe() {
+  $('#describe-chips').innerHTML = describeResult.length
+    ? describeResult.map((t, i) => chip({ ...t, cn: t.cn || t.word }, t.on ? '' : 'off').replace('<span class="chip', `<span data-i="${i}" class="chip`)).join('')
+    : '<span class="empty">没有转出标签</span>';
+}
+$('#describe-chips').addEventListener('click', (event) => {
+  const el = event.target.closest('[data-i]');
+  if (!el) return;
+  const item = describeResult[Number(el.dataset.i)];
+  item.on = !item.on;
+  renderDescribe();
+});
+$('#describe-add').addEventListener('click', () => addTags(describeResult.filter((t) => t.on)));
+$('#describe-input').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) $('#describe-btn').click();
+});
+
+// ---------- ② 查标签 ----------
+
+let lastResults = [];
+const doSearch = debounce(async () => {
+  const q = $('#search-input').value.trim();
+  if (!q) {
+    $('#search-results').innerHTML = '<div class="empty">输入后自动搜索，点一行加入已选。悬停可看中文释义。</div>';
+    return;
+  }
+  try {
+    const params = new URLSearchParams({ q, limit: 50, nsfw: state.nsfw ? '1' : '0' });
+    if (searchCat) params.set('cat', searchCat);
+    const { results } = await api('GET', `/search?${params}`);
+    lastResults = results;
+    $('#search-results').innerHTML = results.length
+      ? results.map((r, i) => `
+        <div class="result c${r.cat}" data-i="${i}" title="${esc(r.wiki)}">
+          <span class="dot"></span>
+          <span class="name">${esc(r.text)} <span class="cn">${esc(r.cn.join('，'))}</span></span>
+          <span class="meta">${esc(r.category)} · ${fmtNum(r.posts)}</span>
+        </div>`).join('')
+      : '<div class="empty">没找到，换个说法试试</div>';
+  } catch (err) {
+    toast(err.message, true);
+  }
+}, 250);
+$('#search-input').addEventListener('input', doSearch);
+$('#search-results').addEventListener('click', (event) => {
+  const el = event.target.closest('.result[data-i]');
+  if (!el) return;
+  const r = lastResults[Number(el.dataset.i)];
+  addTags([{ text: r.text, name: r.name, cn: r.cn[0] || '', cat: r.cat }]);
+});
+$('#search-cats').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-cat]');
+  if (!button) return;
+  searchCat = button.dataset.cat;
+  for (const b of $('#search-cats').children) b.classList.toggle('active', b === button);
+  doSearch();
+});
+
+// ---------- ③ 预设 ----------
+
+let presetIndex = 0;
+function renderPresets() {
+  $('#preset-tabs').innerHTML = presets.groups.map((g, i) =>
+    `<button data-i="${i}" class="${i === presetIndex ? 'active' : ''}">${esc(g.name)}</button>`).join('');
+  const group = presets.groups[presetIndex];
+  $('#preset-chips').innerHTML = group
+    ? group.tags.map(([en, zh], i) => `<span class="chip" data-i="${i}" title="${esc(en)}"><span class="dot"></span>${esc(zh)} <span class="cn">${esc(en)}</span></span>`).join('')
+    : '';
+}
+$('#preset-tabs').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-i]');
+  if (!button) return;
+  presetIndex = Number(button.dataset.i);
+  renderPresets();
+});
+$('#preset-chips').addEventListener('click', (event) => {
+  const el = event.target.closest('[data-i]');
+  if (!el) return;
+  const [en, zh] = presets.groups[presetIndex].tags[Number(el.dataset.i)];
+  addTags([{ text: en, name: en, cn: zh, cat: 0 }]);
+});
+
+// ---------- 关联推荐 / 推荐画师 ----------
+
+let related = [];
+let artists = [];
+const refreshRecommend = debounce(async () => {
+  const tags = state.selected.filter((s) => !s.text.startsWith('artist:')).map((s) => s.name);
+  if (!tags.length) {
+    related = artists = [];
+    $('#related').innerHTML = $('#artists').innerHTML = '<div class="empty">先加几个标签</div>';
+    return;
+  }
+  try {
+    const [r, a] = await Promise.all([
+      api('POST', '/related', { tags, limit: 30, nsfw: state.nsfw }),
+      api('POST', '/artists', { tags, limit: 16 }),
+    ]);
+    const chosen = new Set(state.selected.map((s) => s.text));
+    related = r.results.filter((t) => !chosen.has(t.text));
+    artists = a.results.filter((t) => !chosen.has(t.text));
+    $('#related').innerHTML = related.length
+      ? related.map((t, i) => chip({ ...t, cn: t.cn[0] || '' }).replace('<span class="chip', `<span data-i="${i}" class="chip`)).join('')
+      : '<div class="empty">没有找到常一起出现的标签</div>';
+    $('#artists').innerHTML = artists.length
+      ? artists.map((t, i) => `<span class="chip c1" data-i="${i}" title="作品 ${fmtNum(t.posts)} 张，相关：${esc(t.sources.join('、'))}"><span class="dot"></span>${esc(t.text)}${t.zh ? ` <span class="cn">${esc(t.zh)}</span>` : ''} <span class="cn">${t.score}%</span></span>`).join('')
+      : '<div class="empty">没有找到合适的画师</div>';
+  } catch (err) {
+    toast(err.message, true);
+  }
+}, 400);
+$('#related').addEventListener('click', (event) => {
+  const el = event.target.closest('[data-i]');
+  if (!el) return;
+  const t = related[Number(el.dataset.i)];
+  addTags([{ text: t.text, name: t.name, cn: t.cn[0] || '', cat: t.cat }]);
+});
+$('#artists').addEventListener('click', (event) => {
+  const el = event.target.closest('[data-i]');
+  if (!el) return;
+  const t = artists[Number(el.dataset.i)];
+  addTags([{ text: t.text, name: t.name, cn: t.zh, cat: 1 }]);
+});
+
+// ---------- 试生成 ----------
+
+$('#sk').value = store.get('naiPrompt.sk', '');
+$('#remember-sk').checked = Boolean($('#sk').value);
+$('#remember-sk').addEventListener('change', (e) => { if (!e.target.checked) store.remove('naiPrompt.sk'); });
+$('#model').addEventListener('change', (e) => { state.model = e.target.value; renderWorkspace(); });
+$('#ratio').addEventListener('change', (e) => { state.ratio = e.target.value; save(); });
+
+$('#generate-btn').addEventListener('click', run(async () => {
+  const sk = $('#sk').value.trim();
+  if (!sk) throw new Error('先填调用密钥 sk');
+  const prompt = buildPrompt();
+  if (!prompt) throw new Error('先加几个标签');
+  if ($('#remember-sk').checked) store.set('naiPrompt.sk', sk);
+  const box = $('#gen-result');
+  box.innerHTML = '<p class="muted">生成中，通常几秒，排队时会更久…</p>';
+  const res = await fetch('/v1/images/generations', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${sk}` },
+    // 这里拼好的已经是标签（AI 写的短句也在里面），出图时不再走一遍 AI 优化，免得把挑好的标签又改掉
+    body: JSON.stringify({
+      model: state.model || undefined, prompt, negative_prompt: state.negative || undefined, size: state.ratio,
+      response_format: 'url', ai_optimize: false,
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.data?.length) {
+    box.innerHTML = `<p class="err-text">${esc(data.error?.message || `生成失败：HTTP ${res.status}`)}</p>`;
+    return;
+  }
+  box.innerHTML = data.data.map((d) =>
+    `<a href="${esc(d.url)}" target="_blank" rel="noopener"><img src="${esc(d.url)}" alt="生成结果"></a>`).join('') +
+    `<p class="hint">点图片打开原图。链接有有效期，需要的话请及时保存。</p>`;
+}));
+
+// ---------- 收藏 ----------
+
+function renderFavorites() {
+  $('#fav-count').textContent = favorites.length ? `${favorites.length} 条` : '';
+  $('#favorites').innerHTML = favorites.length
+    ? favorites.map((f, i) => `
+      <div class="fav" data-i="${i}">
+        <span class="text" title="${esc(f.prompt)}">${esc(f.prompt)}</span>
+        <span class="muted" style="font-size:12px">${new Date(f.at).toLocaleDateString('zh-CN')}</span>
+        <button class="link" data-act="load">恢复</button><button class="link" data-act="del">删除</button>
+      </div>`).join('')
+    : '<div class="empty">还没有收藏</div>';
+}
+$('#save-fav').addEventListener('click', () => {
+  if (!state.selected.length) return toast('先加几个标签', true);
+  favorites.unshift({
+    at: Date.now(), prompt: buildPrompt(),
+    selected: structuredClone(state.selected), negative: state.negative, quality: state.quality,
+  });
+  favorites = favorites.slice(0, 100);
+  store.set('naiPrompt.favorites', favorites);
+  renderFavorites();
+  toast('已收藏');
+});
+$('#favorites').addEventListener('click', (event) => {
+  const button = event.target.closest('button[data-act]');
+  const row = event.target.closest('.fav');
+  if (!button || !row) return;
+  const i = Number(row.dataset.i);
+  if (button.dataset.act === 'del') {
+    favorites.splice(i, 1);
+  } else {
+    snapshot();
+    const f = favorites[i];
+    Object.assign(state, { selected: structuredClone(f.selected), negative: f.negative, quality: f.quality });
+    $('#negative').value = state.negative;
+    $('#quality').value = state.quality;
+    renderWorkspace();
+    toast('已恢复');
+  }
+  store.set('naiPrompt.favorites', favorites);
+  renderFavorites();
+});
+
+// ---------- 启动 ----------
+
+$('#nsfw').checked = state.nsfw;
+$('#nsfw').addEventListener('change', (e) => {
+  state.nsfw = e.target.checked;
+  save();
+  doSearch();
+  refreshRecommend();
+});
+
+(async () => {
+  try {
+    const [p, models] = await Promise.all([
+      api('GET', '/presets'),
+      fetch('/v1/models').then((r) => r.json()),
+    ]);
+    presets = p;
+    $('#ai-btn').hidden = !p.ai;
+    renderPresets();
+    $('#quality').innerHTML = '<option value="">不加</option>' +
+      presets.quality.map((q) => `<option value="${esc(q.text)}">${esc(q.name)}</option>`).join('');
+    $('#quality').value = state.quality;
+    $('#negative-preset').innerHTML = '<option value="">选择后填入…</option>' +
+      presets.negative.map((q) => `<option value="${esc(q.text)}">${esc(q.name)}</option>`).join('');
+    const ids = (models.data || []).map((m) => m.id);
+    $('#model').innerHTML = ids.map((id) => `<option>${esc(id)}</option>`).join('');
+    if (!ids.includes(state.model)) state.model = ids[0] || '';
+    $('#model').value = state.model;
+  } catch (err) {
+    toast(`加载失败：${err.message}`, true);
+  }
+  $('#negative').value = state.negative;
+  $('#weight-format').value = state.weightFormat;
+  $('#ratio').value = state.ratio;
+  renderWorkspace();
+  renderFavorites();
+})();
+</script>
+</body>
+</html>

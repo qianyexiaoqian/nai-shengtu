@@ -1,0 +1,24 @@
+services:
+  nai-relay:
+    build: .
+    image: nai-relay:latest
+    container_name: nai-relay
+    restart: unless-stopped
+    # ADMIN_PASSWORD、UPSTREAM_KEY、PORT 等都在同目录的 .env 里
+    env_file: .env
+    environment:
+      HOST: 0.0.0.0
+      DATA_DIR: /app/data
+    ports:
+      # API、图片链接、后台都在这一个端口；只走反代时改成 "127.0.0.1:${PORT:-3000}:${PORT:-3000}"
+      - "${PORT:-3000}:${PORT:-3000}"
+    volumes:
+      - nai-relay-data:/app/data
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  nai-relay-data:

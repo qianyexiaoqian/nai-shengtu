@@ -1,0 +1,109 @@
+import { linkAiCall, optimizePrompt, wantsAi } from './aiPrompt.js';
+import { HttpError } from './http.js';
+import { saveImage } from './imageStore.js';
+import { assertQuota, keyAllowsAi } from './keys.js';
+import { resolveModel } from './models.js';
+import { toUpstreamPayload } from './params.js';
+import { assistPrompt } from './promptAssist.js';
+import { generateImages } from './upstream.js';
+import { accountOf } from './upstreamKeys.js';
+import { recordCall } from './usage.js';
+
+const noTagsError = (unmatched) =>
+  new HttpError(400, `提示词里的中文没能识别成标签（${unmatched.join('、')}），换个说法或直接写英文标签`, {
+    param: 'prompt',
+  });
+
+/**
+ * chat 和 images 两个接口共用的出图流程，分两步：
+ * prepare 同步做完模型解析、中文转标签 / 英文纠错、参数合成和额度检查（出错时还没开始流式输出，能按正常状态码返回）；
+ * execute 需要的话先调 AI 优化提示词，再调上游、记日志估算扣点、登记图片 UUID。
+ */
+export function prepareGeneration(ctx, endpoint, body, prompt, params) {
+  const model = resolveModel(body.model);
+  // 提示词里的 --ai / --noai 优先，其次请求体的 ai_optimize；后台给这把密钥关了 AI 优化的，都不走
+  const override = params.ai ?? (typeof body.ai_optimize === 'boolean' ? body.ai_optimize : undefined);
+  const useAi = keyAllowsAi(ctx.key) && wantsAi(prompt, override, model.id);
+  const assist = assistPrompt(prompt);
+  if (!assist.prompt && !useAi) throw noTagsError(assist.unmatched);
+  const payload = toUpstreamPayload(body, assist.prompt, params, model.upstream);
+  if (payload.negative_prompt) {
+    payload.negative_prompt = assistPrompt(payload.negative_prompt).prompt;
+    if (!payload.negative_prompt) delete payload.negative_prompt;
+  }
+  assertQuota(ctx.key, payload.n ?? 1);
+  return { ctx, endpoint, model, payload, prompt, assist, useAi, ai: null };
+}
+
+/**
+ * AI 优化提示词：把本地词典识别出的标签一起发过去做参考，AI 写回来的标签再过一遍中文转换和英文纠错，
+ * NAI4 以后的模型再接上 AI 写的短句（位置、互动、主体大小、光照这些标签说不清的）。
+ * AI 失败（没配好、超时、报错）就用词典转换的结果照常出图，原因记在后台的 AI 调用记录里。
+ */
+async function applyAi(job) {
+  try {
+    const hints = job.assist.converted || job.assist.fixes.length ? job.assist.prompt : '';
+    const result = await optimizePrompt(job.prompt, {
+      hints, source: job.endpoint, key: job.ctx.key, targetModel: job.model.upstream,
+    });
+    const checked = assistPrompt(result.prompt);
+    if (checked.prompt) {
+      job.payload.prompt = result.sentences ? `${checked.prompt}, ${result.sentences}` : checked.prompt;
+      job.ai = { callId: result.callId, cost: result.cost };
+      return;
+    }
+  } catch {
+    // 已经记在 ai_calls 里了，这里回退到词典转换
+  }
+  if (!job.payload.prompt) throw noTagsError(job.assist.unmatched);
+}
+
+export async function executeGeneration(job) {
+  const { ctx, endpoint, model, payload, prompt } = job;
+  if (job.useAi) await applyAi(job);
+
+  const startedAt = Date.now();
+  const call = {
+    key: ctx.key,
+    endpoint,
+    model,
+    prompt,
+    finalPrompt: payload.prompt,
+    size: payload.size ?? '1024x1024', // 上游默认尺寸
+    n: payload.n ?? 1,
+    ip: ctx.ip,
+  };
+
+  let result;
+  try {
+    result = await generateImages(payload);
+  } catch (err) {
+    const { logId } = recordCall({
+      ...call,
+      ...upstreamOf(err.upstreamKey),
+      status: 'error',
+      error: err.internal ?? err.message,
+      durationMs: Date.now() - startedAt,
+    });
+    linkAiCall(job.ai?.callId, logId);
+    throw err;
+  }
+
+  const { body, upstreamKey } = result;
+  const items = body.data.filter((item) => item?.url || item?.b64_json);
+  const { logId } = recordCall({
+    ...call,
+    ...upstreamOf(upstreamKey),
+    status: 'success',
+    images: items.length,
+    durationMs: Date.now() - startedAt,
+  });
+  linkAiCall(job.ai?.callId, logId);
+  return {
+    model,
+    created: body.created ?? Math.floor(Date.now() / 1000),
+    images: items.map((item) => saveImage(item, logId)),
+  };
+}
+
+const upstreamOf = (row) => (row ? { upstreamKeyId: row.id, account: accountOf(row) } : {});

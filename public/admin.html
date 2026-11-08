@@ -1,0 +1,1153 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NAI 中继后台</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #fff; --text: #1f2328; --muted: #6b7280; --border: #e5e7eb;
+    --accent: #2563eb; --accent-weak: #eef3ff; --ok: #15803d; --err: #dc2626; --radius: 10px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --panel: #181b21; --text: #e6e8eb; --muted: #9aa1ab; --border: #2a2f37;
+      --accent: #5b8cff; --accent-weak: #1d2740; --ok: #22c55e; --err: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 14px/1.5 -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; }
+  header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 16px;
+           height: 56px; padding: 0 20px; background: var(--panel); border-bottom: 1px solid var(--border); }
+  header h1 { margin: 0; font-size: 16px; white-space: nowrap; }
+  nav { display: flex; flex: 1; gap: 4px; overflow-x: auto; }
+  nav button { border: none; background: none; padding: 6px 12px; border-radius: 6px; color: var(--muted); }
+  nav button.active { background: var(--accent-weak); color: var(--accent); font-weight: 600; }
+  main { max-width: 1200px; margin: 0 auto; padding: 20px; }
+  h2 { margin: 0 0 12px; font-size: 15px; }
+  .view[hidden], [hidden] { display: none !important; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .card, .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); }
+  .card { padding: 14px 16px; }
+  .card .label { color: var(--muted); font-size: 12px; }
+  .card .value { margin-top: 4px; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .card .sub { min-height: 18px; color: var(--muted); font-size: 12px; }
+  .panel { margin-top: 16px; padding: 16px; }
+  .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 0 16px; }
+  .table-wrap { overflow-x: auto; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { padding: 8px 10px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; vertical-align: middle; }
+  th { color: var(--muted); font-size: 12px; font-weight: 500; }
+  .num { text-align: right; }
+  td.wrap { max-width: 380px; white-space: normal; word-break: break-all; }
+  td.empty { padding: 24px; color: var(--muted); text-align: center; }
+  .badge { display: inline-block; padding: 0 8px; border-radius: 999px; font-size: 12px; background: var(--bg); color: var(--muted); }
+  .badge.ok { background: color-mix(in srgb, var(--ok) 14%, transparent); color: var(--ok); }
+  .badge.err { background: color-mix(in srgb, var(--err) 14%, transparent); color: var(--err); }
+  .badge.accent { background: var(--accent-weak); color: var(--accent); }
+  .err-text { color: var(--err); }
+  .muted { color: var(--muted); }
+  input, select, textarea { padding: 6px 8px; font: inherit; color: inherit; background: var(--bg);
+                            border: 1px solid var(--border); border-radius: 6px; min-width: 0; }
+  textarea { display: block; width: 100%; max-width: 720px; font-family: ui-monospace, Consolas, monospace; resize: vertical; }
+  input.sm { width: 84px; }
+  input.md { width: 200px; }
+  input.url { width: 300px; }
+  input.name { width: 150px; }
+  button { padding: 6px 12px; font: inherit; color: var(--text); background: var(--panel);
+           border: 1px solid var(--border); border-radius: 6px; cursor: pointer; white-space: nowrap; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--err); }
+  button.link { padding: 4px 6px; border: none; background: none; color: var(--accent); }
+  a.link { padding: 4px 6px; color: var(--accent); text-decoration: none; white-space: nowrap; }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+  .spacer { flex: 1; }
+  .hint { margin: 8px 0 0; color: var(--muted); font-size: 12px; }
+  .form-grid { display: grid; grid-template-columns: 140px minmax(0, 520px); gap: 12px 16px; align-items: center; margin-bottom: 20px; }
+  .form-grid .hint { grid-column: 2; margin-top: -6px; }
+  .checks { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 6px 16px; margin-top: 12px; }
+  .checks label { display: flex; align-items: center; gap: 6px; }
+  #login { position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 16px; background: var(--bg); }
+  #login form { display: grid; gap: 12px; width: 100%; max-width: 340px; padding: 24px; background: var(--panel);
+                border: 1px solid var(--border); border-radius: 12px; }
+  #login h1 { margin: 0 0 4px; font-size: 18px; }
+  #toast { position: fixed; left: 50%; bottom: 24px; z-index: 20; transform: translateX(-50%); padding: 8px 16px;
+           border-radius: 8px; background: #111827; color: #fff; opacity: 0; transition: opacity .2s; pointer-events: none; }
+  #toast.show { opacity: .95; }
+  #toast.err { background: var(--err); }
+  dialog { width: calc(100% - 32px); max-width: 520px; padding: 20px; color: var(--text); background: var(--panel);
+           border: 1px solid var(--border); border-radius: 12px; }
+  dialog::backdrop { background: rgb(0 0 0 / .4); }
+  #models-dialog { max-width: 640px; }
+  #models-dialog .checks { max-height: 50vh; overflow-y: auto; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
+  .keybox { margin: 12px 0; padding: 10px 12px; font-family: ui-monospace, Consolas, monospace; word-break: break-all;
+            background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; }
+  @media (max-width: 640px) {
+    header { gap: 8px; padding: 0 12px; }
+    main { padding: 12px; }
+    .grid2 { grid-template-columns: 1fr; }
+    .form-grid { grid-template-columns: 1fr; }
+    .form-grid .hint { grid-column: 1; }
+  }
+</style>
+</head>
+<body>
+
+<div id="login" hidden>
+  <form id="login-form">
+    <h1>NAI 中继后台</h1>
+    <input type="password" id="login-password" placeholder="管理员密码" autocomplete="current-password" required>
+    <button class="primary" type="submit">登录</button>
+    <p class="hint">首次启动的初始密码打印在服务端控制台里；也可以用环境变量 ADMIN_PASSWORD 重置。</p>
+  </form>
+</div>
+
+<header>
+  <h1>NAI 中继后台</h1>
+  <nav id="nav">
+    <button data-view="overview">概览</button>
+    <button data-view="logs">调用日志</button>
+    <button data-view="keys">调用密钥</button>
+    <button data-view="upstream">上游秘钥</button>
+    <button data-view="models">模型</button>
+    <button data-view="ai">AI 优化</button>
+    <button data-view="settings">设置</button>
+  </nav>
+  <a class="link" href="/prompt" target="_blank">提词器</a>
+  <button class="link" id="logout">退出</button>
+</header>
+
+<main>
+  <!-- 概览 -->
+  <section class="view" id="view-overview" hidden>
+    <div class="row"><span class="spacer"></span><button data-refresh="overview">刷新</button></div>
+    <div class="cards" id="overview-cards" style="margin-top:8px"></div>
+    <p class="hint" id="overview-families"></p>
+    <p class="hint">上游扣点是按“模型”页的计价规则估算的，只统计经过本中继的调用；上游账号在网页或其它秘钥上的用量不计入，失败的调用按退点计 0。实际以上游账号流水为准。</p>
+    <div class="grid2">
+      <div class="panel"><h2>近 14 天</h2><div class="table-wrap"><table id="overview-daily"></table></div></div>
+      <div class="panel"><h2>按模型</h2><div class="table-wrap"><table id="overview-models"></table></div></div>
+    </div>
+    <div class="grid2">
+      <div class="panel"><h2>按调用密钥</h2><div class="table-wrap"><table id="overview-keys"></table></div></div>
+      <div class="panel"><h2>按上游秘钥</h2><div class="table-wrap"><table id="overview-upstream"></table></div></div>
+    </div>
+  </section>
+
+  <!-- 调用日志 -->
+  <section class="view" id="view-logs" hidden>
+    <div class="panel">
+      <div class="row">
+        <select id="logs-key"><option value="">全部密钥</option></select>
+        <select id="logs-status">
+          <option value="">全部状态</option><option value="success">成功</option><option value="error">失败</option>
+        </select>
+        <button data-refresh="logs">刷新</button>
+        <span class="spacer"></span>
+        <span class="muted" id="logs-total"></span>
+      </div>
+      <div class="table-wrap" style="margin-top:12px"><table id="logs-table"></table></div>
+      <div class="row" style="margin-top:12px; justify-content:flex-end">
+        <button id="logs-prev">上一页</button><span id="logs-page" class="muted"></span><button id="logs-next">下一页</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 密钥 -->
+  <section class="view" id="view-keys" hidden>
+    <div class="panel">
+      <h2>生成调用密钥</h2>
+      <form class="row" id="key-form">
+        <input id="key-name" class="md" placeholder="名称，如：张三 / 某客户端" maxlength="50" required>
+        <label class="row">额度 <input id="key-quota" class="sm" type="number" min="0" step="1" value="0"> 张</label>
+        <label class="row"><input type="checkbox" id="key-ai" checked> AI 提示词优化</label>
+        <button class="primary" type="submit">生成 sk</button>
+      </form>
+      <p class="hint">
+        额度是这把密钥最多能出的图片张数，0 表示不限。完整密钥只在生成时显示一次，库里只存哈希。<br>
+        不勾“AI 提示词优化”的密钥出图时不调 AI，写 --ai 也不行，中文照常走词典转换；提词器页面的“AI 优化”按钮也用不了。
+        勾上的按“AI 优化”页的设置走。生成后也能在列表里改。
+      </p>
+    </div>
+    <div class="panel">
+      <h2>密钥列表</h2>
+      <div class="table-wrap"><table id="keys-table"></table></div>
+    </div>
+  </section>
+
+  <!-- 上游秘钥 -->
+  <section class="view" id="view-upstream" hidden>
+    <div class="panel">
+      <h2>添加上游秘钥</h2>
+      <form id="upstream-key-form" autocomplete="off">
+        <div class="row">
+          <select id="upstream-key-type" title="上游类型">
+            <option value="openai">OpenAI 兼容</option>
+            <option value="novelai">NovelAI 官方</option>
+          </select>
+          <input id="upstream-key-base" class="url" placeholder="接口地址，如 https://example.com/v1" list="upstream-bases" required>
+        </div>
+        <datalist id="upstream-bases"></datalist>
+        <textarea id="upstream-key-input" rows="3" style="margin-top:8px" placeholder="这个接口的 sk-...，一行一个，可以一次贴多把" required></textarea>
+        <div class="row" style="margin-top:8px">
+          <input id="upstream-key-name" class="md" placeholder="名称（可选），如：主账号">
+          <input id="upstream-key-account" class="md" placeholder="所属账号（可选）">
+          <input id="upstream-key-models" class="url" placeholder="支持的模型（可选，逗号分隔）">
+          <button type="button" id="upstream-key-pull" title="用上面填的接口地址和第一把秘钥查这个上游有哪些模型">拉取模型</button>
+          <button class="primary" type="submit">添加</button>
+        </div>
+      </form>
+      <p class="hint">
+        两种上游可以混着接好几个：<b>OpenAI 兼容</b>的接口地址填到 /v1 为止，中继会请求“地址/images/generations”，
+        “从上游获取”模型时请求“地址/models”，上游给图片链接或 b64_json 都行。
+        <b>NovelAI 官方</b>填官网 Account Settings 里生成的持久令牌（pst-...），接口地址留空就是 https://image.novelai.net；
+        中继照官方网页端的默认值拼质量词和负面预设，同一把令牌的请求排队一张张出（官方不让同一账号并发）。对外一律换成中继的 UUID 链接。
+      </p>
+      <p class="hint">
+        “支持的模型”是上游模型名（模型页“上游模型”那一列）：请求这些模型时才会轮到这把秘钥；留空表示什么模型都接。
+        点“拉取模型”从这个上游的 /models 拉出列表打勾就行（NovelAI 官方列内置的官方模型，同时查套餐和 Anlas 余额），也可以手填，逗号分隔；
+        列表里的秘钥也能单独拉取。接了好几个上游、各家模型不一样时，每把都填上，免得请求被发到没有这个模型的上游。
+      </p>
+      <p class="hint">
+        支持某个模型的秘钥按顺序轮询。某把秘钥被上游拒绝（401 失效、402 点数不足、403 不允许该模型、429 限流）时，自动换下一把重试，
+        这把冷却 10 分钟（限流 1 分钟）再参与轮询；上游说没有这个模型（404）也换下一把，但不冷却。
+        超时和上游 5xx 不换秘钥重试，因为上游可能已经出图扣点。
+      </p>
+      <p class="hint">
+        “所属账号”用来估算扣点：有的上游按账号分档计价（比如每天前若干张便宜），同一个上游账号的多把秘钥请填同一个账号名；不填则每把秘钥单独算。
+      </p>
+      <p class="hint">
+        OpenAI 兼容的上游没有统一的余额接口，余额请到各个上游网站查看；NovelAI 官方令牌点“拉取模型”能看到 Anlas 余额。
+        这里显示的是经过本中继的估算用量。
+      </p>
+    </div>
+    <div class="panel">
+      <h2>上游秘钥列表</h2>
+      <div class="table-wrap"><table id="upstream-keys-table"></table></div>
+    </div>
+  </section>
+
+  <!-- 模型 -->
+  <section class="view" id="view-models" hidden>
+    <div class="panel">
+      <h2>从上游获取</h2>
+      <div class="row">
+        <button id="upstream-fetch">获取上游模型列表</button>
+        <button class="primary" id="upstream-add" hidden>添加选中</button>
+      </div>
+      <div class="checks" id="upstream-list"></div>
+      <div id="upstream-errors"></div>
+    </div>
+    <div class="panel">
+      <h2>手动添加</h2>
+      <form class="row" id="model-form">
+        <input id="model-id" class="md" placeholder="对外名称，如 anime-v5" required>
+        <input id="model-upstream" class="md" placeholder="上游模型（留空则同名）" list="upstream-ids">
+        <datalist id="upstream-ids"></datalist>
+        <button class="primary" type="submit">添加</button>
+      </form>
+      <p class="hint">对外名称是调用方请求里填的 model；上游模型是实际发给上游的模型名，多个名称可以指向同一个上游模型。</p>
+    </div>
+    <div class="panel">
+      <h2>已添加模型</h2>
+      <div class="table-wrap"><table id="models-table"></table></div>
+      <p class="hint">
+        计价用来估算上游扣点：每张基础点数；“每日第 N 张后”按北京时间零点重置，同一代模型（如 NAI5 精选版和完整版）合并计数，0 表示不分档；
+        大图指总像素超过 1024×1024。新添加的模型计价都是 0（不估算），按自己上游的实际价格填；
+        NovelAI 官方按 Anlas 计，Opus 订阅出普通尺寸（不超过 1024×1024、28 步以内、一次一张）不花 Anlas。
+      </p>
+    </div>
+  </section>
+
+  <!-- AI 优化 -->
+  <section class="view" id="view-ai" hidden>
+    <div class="cards" id="ai-cards"></div>
+    <form class="panel" id="ai-form" autocomplete="off">
+      <h2>AI 提示词优化</h2>
+      <p class="hint" style="margin:0 0 12px">
+        接任意 OpenAI 兼容接口（/chat/completions），把用户的描述改写成 NAI 认识的 Danbooru 标签，改写结果会再过一遍本地标签库纠错。
+        AI 出错或超时会自动退回词典转换，不影响出图。每次调用按接口返回的 tokens 和下面的价格算成本。
+      </p>
+      <div class="form-grid">
+        <label for="ai-mode">什么时候优化</label>
+        <select id="ai-mode" name="ai_mode">
+          <option value="off">关闭</option>
+          <option value="auto">自动：提示词里有中文或英文句子时（推荐）</option>
+          <option value="always">每次都优化</option>
+        </select>
+        <p class="hint">“自动”时，已经是英文标签的提示词不调 AI、不花钱。调用方也可以在提示词里写 --ai 强制优化、--noai 跳过，或在请求体里传 "ai_optimize": true / false。</p>
+        <label for="ai-scope">对哪些模型生效</label>
+        <select id="ai-scope">
+          <option value="all">所有模型</option>
+          <option value="some">只对勾选的模型</option>
+        </select>
+        <div class="checks" id="ai-apply-models" style="grid-column:2; margin-top:0" hidden></div>
+        <p class="hint">
+          按“模型”页的对外名称选。没勾的模型不调 AI，调用方写 --ai 也不行，提示词照常走词典转换；
+          提词器页面的“AI 优化”按钮也只对勾选的模型开放。下面的“测试”不受影响。
+          某把调用密钥不想用 AI 优化，在“密钥”页取消它的“AI 优化”勾选。
+        </p>
+        <label for="ai-base">接口地址</label>
+        <input id="ai-base" name="ai_base_url" placeholder="https://api.openai.com/v1">
+        <p class="hint">填到 /v1 为止，中继会请求“地址/chat/completions”。</p>
+        <label for="ai-key">API Key</label>
+        <input id="ai-key" name="ai_api_key" type="password" autocomplete="new-password">
+        <p class="hint" id="ai-key-hint"></p>
+        <label for="ai-model">模型名称</label>
+        <input id="ai-model" name="ai_model" placeholder="比如 deepseek-flash、gpt-4o-mini">
+        <label for="ai-effort">思考强度</label>
+        <select id="ai-effort" name="ai_reasoning_effort">
+          <option value="">不传（用模型默认）</option>
+          <option value="none">none：不思考</option>
+          <option value="minimal">minimal</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="max">max</option>
+        </select>
+        <p class="hint">
+          原样传给接口的 reasoning_effort。DeepSeek 新模型默认先思考，改写提示词用不着：选 none 快一倍、成本省一半，效果差不多
+          （DeepSeek 支持 none / low / high / max）。OpenAI 的推理模型用 minimal～high。不认这个参数的模型选“不传”。
+        </p>
+        <label for="ai-tools">让 AI 查标签库</label>
+        <label class="row"><input id="ai-tools" name="ai_tools" type="checkbox"> 允许 AI 用工具调用查内置标签库</label>
+        <p class="hint">
+          仿 DanbooruSearch 的 MCP 工具：AI 改写时可以调用“整段转标签 / 核对标签和拼写 / 关联推荐 / 推荐画师”，
+          用到的标签都在库里核实过，更准；代价是一次优化要请求 2～5 轮，更慢、tokens 更多（每轮都按价格计费）。
+          模型要支持 function calling；不支持时自动退回普通方式，调用记录里会注明。
+        </p>
+      </div>
+      <h2>价格 <span class="muted" style="font-weight:400; font-size:12px">元 / 百万 tokens</span></h2>
+      <div class="form-grid">
+        <label for="ai-price-input">输入</label>
+        <div class="row"><input id="ai-price-input" name="ai_price_input" class="sm" type="number" min="0" step="any"> 元</div>
+        <label for="ai-price-output">输出</label>
+        <div class="row"><input id="ai-price-output" name="ai_price_output" class="sm" type="number" min="0" step="any"> 元</div>
+        <label for="ai-price-cache-read">缓存读取</label>
+        <div class="row"><input id="ai-price-cache-read" name="ai_price_cache_read" class="sm" type="number" min="0" step="any"> 元</div>
+        <p class="hint">命中缓存的输入（OpenAI 的 cached_tokens、DeepSeek 的缓存命中、Claude 的 cache_read）。</p>
+        <label for="ai-price-cache-write">缓存创建</label>
+        <div class="row"><input id="ai-price-cache-write" name="ai_price_cache_write" class="sm" type="number" min="0" step="any"> 元</div>
+        <p class="hint">
+          写入缓存的输入（Claude 的 cache_creation），没有这项的模型填 0。美元价格请乘以汇率换成人民币。<br>
+          成本 = 没命中缓存的输入 × 输入价 + 缓存读取 × 缓存读取价 + 缓存创建 × 缓存创建价 + 输出 × 输出价。
+        </p>
+        <label for="ai-offpeak">闲时半价</label>
+        <label class="row"><input id="ai-offpeak" name="ai_offpeak" type="checkbox"> 高峰时段以外按半价算成本（DeepSeek 官方接口）</label>
+        <p class="hint">
+          DeepSeek 官方按北京时间分时计价：工作日 9:00–12:00、14:00–18:00 是高峰，其它时间（含周末）半价。
+          勾选后上面填高峰价，闲时自动减半；法定节假日调休不管。别家接口不要勾。
+        </p>
+      </div>
+      <h2>系统提示词</h2>
+      <textarea id="ai-system" name="ai_system_prompt" rows="12"></textarea>
+      <div class="row" style="margin:8px 0 16px">
+        <button type="button" id="ai-system-reset">恢复内置</button>
+        <span class="hint" style="margin:0">告诉 AI 怎么改写；和内置的一样时会跟着版本更新。</span>
+      </div>
+      <button class="primary" type="submit">保存</button>
+    </form>
+    <div class="panel">
+      <h2>测试</h2>
+      <textarea id="ai-test-input" rows="2">原神的可莉，开心地笑，背景是蒙德城</textarea>
+      <div class="row" style="margin-top:8px">
+        <button class="primary" id="ai-test-btn">用已保存的配置试一次</button>
+        <span class="hint" style="margin:0">会真实调用一次 AI 接口并计入用量；不用先打开开关，改了配置先保存。</span>
+      </div>
+      <div id="ai-test-result"></div>
+    </div>
+    <div class="panel">
+      <h2>调用记录</h2>
+      <div class="table-wrap"><table id="ai-calls"></table></div>
+      <div class="row" style="margin-top:12px; justify-content:flex-end">
+        <button id="ai-prev">上一页</button><span id="ai-page" class="muted"></span><button id="ai-next">下一页</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- 设置 -->
+  <section class="view" id="view-settings" hidden>
+    <form class="panel" id="settings-form" autocomplete="off">
+      <p class="hint" style="margin:0 0 12px">上游的接口地址和秘钥在“上游秘钥”页管理，每把秘钥带自己的接口地址，可以接多个上游。</p>
+      <h2>调用</h2>
+      <div class="form-grid">
+        <label for="s-default_model">默认模型</label>
+        <select id="s-default_model" name="default_model"></select>
+        <p class="hint">请求没写模型，或写了 dall-e-3、gpt-image-1 这类别家模型名时使用。</p>
+        <label for="s-public_base_url">对外地址</label>
+        <input id="s-public_base_url" name="public_base_url" placeholder="留空 = 调用方访问用的地址">
+        <p class="hint" id="s-public_base_url-hint"></p>
+        <label for="s-chat_image_mode">聊天图片形式</label>
+        <select id="s-chat_image_mode" name="chat_image_mode">
+          <option value="url">图片链接（/v1/img/UUID.png）</option>
+          <option value="b64">内嵌 base64</option>
+        </select>
+        <label for="s-image_ttl_days">图片链接有效期</label>
+        <div class="row"><input id="s-image_ttl_days" name="image_ttl_days" class="sm" type="number" min="1" max="365" step="1"> 天</div>
+        <p class="hint">修改只影响之后生成的图片。</p>
+        <label for="s-hide_words">错误信息隐藏词</label>
+        <input id="s-hide_words" name="hide_words">
+        <p class="hint">逗号分隔。上游返回的错误信息里出现这些词会替换成 ***；网址、域名、邮箱、IP 总会被隐藏。</p>
+      </div>
+      <h2>提词</h2>
+      <div class="form-grid">
+        <label for="s-prompt_assist">中文转标签</label>
+        <label class="row"><input id="s-prompt_assist" name="prompt_assist" type="checkbox"> 提示词里的中文自动转成 Danbooru 标签</label>
+        <p class="hint">聊天和图片接口都生效：只转换含中文的部分，权重写法原样保留，认不出的中文会丢掉（NAI 看不懂中文）。</p>
+        <label for="s-prompt_fix">英文自动修正</label>
+        <label class="row"><input id="s-prompt_fix" name="prompt_fix" type="checkbox"> 英文标签纠错</label>
+        <p class="hint">
+          别名和 Danbooru 已废弃的旧标签换成现行标签（valentines → valentine），单复数、连字符写法统一（twintail → twintails，
+          cat-ears → cat ears），明显拼错的纠正（selafuku → serafuku）。英文句子、artist: 等带前缀的写法、
+          masterpiece 这类 NAI 质量词、画师名和认不出的词都原样保留。
+        </p>
+        <label for="s-prompt_echo">回复里附提示词</label>
+        <label class="row"><input id="s-prompt_echo" name="prompt_echo" type="checkbox"> 转换或修正过的话，在聊天回复的图片下面附上实际用的提示词和改了哪些</label>
+        <label for="s-prompt_assist_nsfw">允许 NSFW 标签</label>
+        <label class="row"><input id="s-prompt_assist_nsfw" name="prompt_assist_nsfw" type="checkbox"> 中文转标签时允许转出 NSFW 标签</label>
+        <p class="hint">不勾选时只转出全年龄标签。提词器页面 <a href="/prompt" target="_blank">/prompt</a> 有自己的开关。</p>
+      </div>
+      <h2>统计</h2>
+      <div class="form-grid">
+        <label for="s-point_price">每点价格</label>
+        <div class="row"><input id="s-point_price" name="point_price" class="sm" type="number" min="0" step="any"> 元 / 点</div>
+        <p class="hint">
+          概览会把扣点折算成金额，0 表示不折算。按自己上游的充值价格填，比如 1000 点 ¥10 就填 0.01。
+        </p>
+      </div>
+      <h2>管理员密码</h2>
+      <div class="form-grid">
+        <label for="s-new_password">新密码</label>
+        <input id="s-new_password" name="new_password" type="password" autocomplete="new-password" minlength="8">
+        <p class="hint" id="s-password-hint">留空不修改，至少 8 位。</p>
+      </div>
+      <button class="primary" type="submit">保存设置</button>
+    </form>
+  </section>
+</main>
+
+<dialog id="key-dialog">
+  <h2>密钥已生成</h2>
+  <p class="muted" id="key-dialog-name"></p>
+  <div class="keybox" id="key-dialog-value"></div>
+  <p class="err-text">只显示这一次，关掉后无法再查看，请立即复制保存。</p>
+  <div class="row" style="justify-content:flex-end">
+    <button id="key-dialog-copy">复制</button>
+    <button class="primary" id="key-dialog-close">我已保存</button>
+  </div>
+</dialog>
+
+<dialog id="models-dialog">
+  <h2>支持的模型</h2>
+  <p class="muted" id="models-dialog-title" style="word-break:break-all"></p>
+  <div class="row">
+    <input type="search" id="models-dialog-filter" placeholder="筛选" style="flex:1">
+    <button type="button" class="link" id="models-dialog-all">全选</button>
+    <button type="button" class="link" id="models-dialog-none">全不选</button>
+  </div>
+  <div class="checks" id="models-dialog-list"></div>
+  <p class="hint">请求勾选的模型时才会轮到这把秘钥；全不勾 = 什么模型都接。</p>
+  <div class="row" style="justify-content:flex-end; margin-top:12px">
+    <button type="button" id="models-dialog-cancel">取消</button>
+    <button type="button" class="primary" id="models-dialog-save">保存</button>
+  </div>
+</dialog>
+
+<div id="toast"></div>
+
+<script>
+'use strict';
+
+const $ = (selector) => document.querySelector(selector);
+const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (c) =>
+  ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+
+const storage = {
+  get(key) { try { return localStorage.getItem(key); } catch { return null; } },
+  set(key, value) { try { localStorage.setItem(key, value); } catch { /* 隐私模式等情况下不记住登录 */ } },
+  remove(key) { try { localStorage.removeItem(key); } catch { /* 同上 */ } },
+};
+
+const state = { token: storage.get('naiAdminToken'), view: null, pointPrice: 0, logsPage: 1, logsPages: 1 };
+
+// ---------- 通用 ----------
+
+async function api(method, path, body) {
+  const res = await fetch(`/admin/api${path}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${state.token}` },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (res.status === 401 && path !== '/login') {
+    showLogin();
+    throw new Error('请先登录');
+  }
+  if (!res.ok) throw new Error(data.error?.message || `HTTP ${res.status}`);
+  return data;
+}
+
+let toastTimer;
+function toast(message, isError = false) {
+  const el = $('#toast');
+  el.textContent = message;
+  el.className = `show${isError ? ' err' : ''}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.className = ''), isError ? 4000 : 2000);
+}
+
+/** 包一层：出错时弹提示，按钮在请求期间禁用 */
+function action(fn) {
+  return async (event) => {
+    const button = event?.submitter || (event?.currentTarget instanceof HTMLButtonElement ? event.currentTarget : null);
+    if (event?.type === 'submit') event.preventDefault();
+    if (button) button.disabled = true;
+    try {
+      await fn(event);
+    } catch (err) {
+      toast(err.message, true);
+    } finally {
+      if (button) button.disabled = false;
+    }
+  };
+}
+
+const fmtNum = (n) => Number(n || 0).toLocaleString('zh-CN', { maximumFractionDigits: 2 });
+const fmtPoints = (p) => `${fmtNum(p)} 点`;
+const fmtMoney = (p) => (state.pointPrice > 0 ? `≈ ¥${(Number(p || 0) * state.pointPrice).toFixed(2)}` : '');
+const fmtPointsMoney = (p) => [fmtPoints(p), fmtMoney(p)].filter(Boolean).join(' ');
+const fmtTime = (ms) => (ms ? new Date(ms).toLocaleString('zh-CN', { hour12: false }) : '—');
+// AI 成本一次往往不到一分钱，小数多留几位
+const fmtCost = (yuan) => {
+  const n = Number(yuan || 0);
+  return `¥${n === 0 ? '0' : n < 0.01 ? n.toFixed(4) : n.toFixed(2)}`;
+};
+const naiYuan = (points) => Number(points || 0) * state.pointPrice;
+const modelFamily = (upstream) => String(upstream).replace(/-(?:full|curated(?:-preview)?)$/, '');
+
+/** columns: [[标题, 'num'?]]；rows: 单元格 HTML（调用方负责转义） */
+function renderTable(el, columns, rows, emptyText = '暂无数据') {
+  const head = `<tr>${columns.map(([label, cls]) => `<th class="${cls || ''}">${label}</th>`).join('')}</tr>`;
+  const body = rows.length
+    ? rows.map((cells) => `<tr>${cells.map((cell, i) => `<td class="${columns[i][1] || ''}">${cell}</td>`).join('')}</tr>`).join('')
+    : `<tr><td class="empty" colspan="${columns.length}">${emptyText}</td></tr>`;
+  el.innerHTML = `<thead>${head}</thead><tbody>${body}</tbody>`;
+}
+
+async function copyText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast('已复制');
+  } catch {
+    toast('复制失败，请手动选中复制', true);
+  }
+}
+
+// ---------- 登录与导航 ----------
+
+function showLogin() {
+  state.token = null;
+  storage.remove('naiAdminToken');
+  $('#login').hidden = false;
+  $('#login-password').focus();
+}
+
+$('#login-form').addEventListener('submit', action(async () => {
+  const { token } = await api('POST', '/login', { password: $('#login-password').value });
+  state.token = token;
+  storage.set('naiAdminToken', token);
+  $('#login-password').value = '';
+  $('#login').hidden = true;
+  showView(state.view || viewFromHash());
+}));
+
+$('#logout').addEventListener('click', action(async () => {
+  await api('POST', '/logout').catch(() => {});
+  showLogin();
+}));
+
+const loaders = {};
+const viewFromHash = () => (location.hash.slice(1) in loaders ? location.hash.slice(1) : 'overview');
+
+function showView(view) {
+  state.view = view;
+  if (location.hash.slice(1) !== view) history.replaceState(null, '', `#${view}`);
+  for (const section of document.querySelectorAll('.view')) section.hidden = section.id !== `view-${view}`;
+  for (const button of document.querySelectorAll('#nav button')) button.classList.toggle('active', button.dataset.view === view);
+  loaders[view]().catch((err) => toast(err.message, true));
+}
+
+$('#nav').addEventListener('click', (event) => {
+  const view = event.target.closest('button')?.dataset.view;
+  if (view) showView(view);
+});
+document.addEventListener('click', (event) => {
+  const view = event.target.closest('[data-refresh]')?.dataset.refresh;
+  if (view) loaders[view]().then(() => toast('已刷新'), (err) => toast(err.message, true));
+});
+
+// ---------- 概览 ----------
+
+loaders.overview = async () => {
+  const [stats, { models }] = await Promise.all([api('GET', '/stats'), api('GET', '/models')]);
+  state.pointPrice = stats.pointPrice;
+  const { today, total, ai } = stats;
+  const aiSub = (a) => `${fmtNum(a.calls)} 次 · 输入 ${fmtNum(a.input_tokens)} / 输出 ${fmtNum(a.output_tokens)} tokens`;
+  const totalSub = (points, a) => `NAI ${fmtCost(naiYuan(points))} + AI ${fmtCost(a.cost)}`;
+  const cards = [
+    ['今日调用', fmtNum(today.calls), `成功 ${fmtNum(today.success)} · 失败 ${fmtNum(today.calls - today.success)}`],
+    ['今日出图', `${fmtNum(today.images)} 张`, ''],
+    ['今日上游扣点（估）', fmtPoints(today.points), fmtMoney(today.points)],
+    ['今日 AI 优化成本', fmtCost(ai.today.cost), aiSub(ai.today)],
+    ['今日总成本（估）', fmtCost(naiYuan(today.points) + ai.today.cost), totalSub(today.points, ai.today)],
+    ['累计调用', fmtNum(total.calls), `成功 ${fmtNum(total.success)} · 失败 ${fmtNum(total.calls - total.success)}`],
+    ['累计出图', `${fmtNum(total.images)} 张`, ''],
+    ['累计上游扣点（估）', fmtPoints(total.points), fmtMoney(total.points)],
+    ['累计 AI 优化成本', fmtCost(ai.total.cost), aiSub(ai.total)],
+    ['累计总成本（估）', fmtCost(naiYuan(total.points) + ai.total.cost), totalSub(total.points, ai.total)],
+  ];
+  $('#overview-cards').innerHTML = cards.map(([label, value, sub]) =>
+    `<div class="card"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${esc(sub)}</div></div>`).join('');
+
+  // 今天每个上游账号各代模型的出图数，对照分档线
+  $('#overview-families').innerHTML = stats.todayFamilies.map(({ account_label: account, family, images }) => {
+    const tiered = models.find((m) => modelFamily(m.upstream) === family && m.tier_after > 0);
+    const tier = tiered
+      ? (images >= tiered.tier_after
+        ? `，已超过每日 ${tiered.tier_after} 张，现按 ${fmtNum(tiered.tier_price)} 点/张`
+        : `，再出 ${tiered.tier_after - images} 张后按 ${fmtNum(tiered.tier_price)} 点/张`)
+      : '';
+    return `今日上游账号「${esc(account)}」${esc(family)} 已出 ${fmtNum(images)} 张${tier}`;
+  }).join('<br>');
+
+  renderTable($('#overview-daily'),
+    [['日期'], ['调用', 'num'], ['出图', 'num'], ['扣点（估）', 'num'], ['NAI 金额', 'num'], ['AI 次数', 'num'], ['AI 成本', 'num'], ['总成本', 'num']],
+    stats.daily.map((d) => [d.day, fmtNum(d.calls), fmtNum(d.images), fmtNum(d.points), fmtCost(naiYuan(d.points)),
+      fmtNum(d.ai_calls), fmtCost(d.ai_cost), fmtCost(naiYuan(d.points) + d.ai_cost)]));
+  renderTable($('#overview-models'),
+    [['模型'], ['调用', 'num'], ['出图', 'num'], ['扣点（估）', 'num'], ['今日出图', 'num'], ['今日扣点', 'num']],
+    stats.byModel.map((m) => [esc(m.model), fmtNum(m.calls), fmtNum(m.images), fmtPointsMoney(m.points),
+      fmtNum(m.today_images), fmtNum(m.today_points)]));
+  renderTable($('#overview-keys'),
+    [['密钥'], ['调用', 'num'], ['出图', 'num'], ['扣点（估）', 'num'], ['AI 优化', 'num'], ['总成本', 'num'], ['今日出图', 'num']],
+    stats.byKey.map((k) => [`${esc(k.name)}${k.deleted ? ' <span class="badge">已删除</span>' : ''}`,
+      fmtNum(k.calls), fmtNum(k.images), fmtPointsMoney(k.points),
+      k.ai_calls ? `${fmtNum(k.ai_calls)} 次 ${fmtCost(k.ai_cost)}` : '—',
+      fmtCost(naiYuan(k.points) + k.ai_cost), fmtNum(k.today_images)]));
+  renderTable($('#overview-upstream'),
+    [['上游秘钥'], ['调用', 'num'], ['成功', 'num'], ['出图', 'num'], ['扣点（估）', 'num'], ['今日出图', 'num'], ['今日扣点', 'num']],
+    stats.byUpstreamKey.map((u) => [`${esc(u.name)}${u.deleted ? ' <span class="badge">已删除</span>' : ''}`,
+      fmtNum(u.calls), fmtNum(u.success), fmtNum(u.images), fmtPointsMoney(u.points), fmtNum(u.today_images), fmtNum(u.today_points)]));
+};
+
+// ---------- 调用日志 ----------
+
+async function fillKeySelect() {
+  const select = $('#logs-key');
+  const current = select.value;
+  const keys = await api('GET', '/keys');
+  select.innerHTML = '<option value="">全部密钥</option>' +
+    keys.map((k) => `<option value="${k.id}">${esc(k.name)}</option>`).join('');
+  select.value = keys.some((k) => String(k.id) === current) ? current : '';
+}
+
+const ENDPOINTS = { chat: '聊天', images: '图片', novelai: 'NovelAI' };
+
+async function loadLogsPage() {
+  const params = new URLSearchParams({ page: state.logsPage, page_size: 20 });
+  if ($('#logs-key').value) params.set('key_id', $('#logs-key').value);
+  if ($('#logs-status').value) params.set('status', $('#logs-status').value);
+  const { total, items, pageSize } = await api('GET', `/logs?${params}`);
+  state.logsPages = Math.max(1, Math.ceil(total / pageSize));
+  $('#logs-total').textContent = `共 ${fmtNum(total)} 条`;
+  $('#logs-page').textContent = `第 ${state.logsPage} / ${state.logsPages} 页`;
+  $('#logs-prev').disabled = state.logsPage <= 1;
+  $('#logs-next').disabled = state.logsPage >= state.logsPages;
+  renderTable($('#logs-table'),
+    [['时间'], ['调用密钥'], ['上游秘钥'], ['接口'], ['模型'], ['尺寸'], ['张数', 'num'], ['状态'], ['扣点（估）', 'num'], ['耗时', 'num'], ['提示词 / 错误']],
+    items.map((l) => [
+      fmtTime(l.created_at),
+      esc(l.key_name),
+      l.upstream_key_name ? esc(l.upstream_key_name) : '<span class="muted">—</span>',
+      ENDPOINTS[l.endpoint] ?? esc(l.endpoint),
+      `${esc(l.model)}${l.upstream_model && l.upstream_model !== l.model ? `<br><span class="muted">→ ${esc(l.upstream_model)}</span>` : ''}`,
+      esc(l.size),
+      `${fmtNum(l.images)} / ${fmtNum(l.n)}`,
+      l.status === 'success' ? '<span class="badge ok">成功</span>' : '<span class="badge err">失败</span>',
+      fmtNum(l.points),
+      `${(Number(l.duration_ms || 0) / 1000).toFixed(1)}s`,
+      `<span title="${esc(l.prompt)}">${esc(String(l.prompt ?? '').slice(0, 80))}</span>` +
+        (l.final_prompt ? `<br><span class="muted" title="${esc(l.final_prompt)}">→ ${esc(l.final_prompt.slice(0, 120))}</span>` : '') +
+        (l.ai_model ? `<br><span class="badge accent">AI 优化</span> <span class="muted">${esc(l.ai_model)} · ${fmtNum(l.ai_input_tokens)} / ${fmtNum(l.ai_output_tokens)} tokens · ${fmtCost(l.ai_cost)}</span>` : '') +
+        (l.error ? `<br><span class="err-text">${esc(l.error)}</span>` : ''),
+    ]));
+  for (const cell of document.querySelectorAll('#logs-table tbody td:last-child')) cell.classList.add('wrap');
+}
+
+loaders.logs = async () => {
+  await fillKeySelect();
+  await loadLogsPage();
+};
+for (const id of ['#logs-key', '#logs-status']) {
+  $(id).addEventListener('change', () => { state.logsPage = 1; loadLogsPage().catch((err) => toast(err.message, true)); });
+}
+$('#logs-prev').addEventListener('click', action(async () => { state.logsPage--; await loadLogsPage(); }));
+$('#logs-next').addEventListener('click', action(async () => { state.logsPage++; await loadLogsPage(); }));
+
+// ---------- 密钥 ----------
+
+loaders.keys = async () => {
+  const keys = await api('GET', '/keys');
+  renderTable($('#keys-table'),
+    [['名称'], ['密钥'], ['启用'], ['AI 优化'], ['已用 / 额度（张）'], ['扣点（估）', 'num'], ['最近使用'], ['创建时间'], ['操作']],
+    keys.map((k) => [
+      `<input class="name" data-field="name" value="${esc(k.name)}" maxlength="50">`,
+      `<code>${esc(k.key_hint)}</code>`,
+      `<input type="checkbox" data-action="toggle" ${k.enabled ? 'checked' : ''}>`,
+      `<input type="checkbox" data-action="toggle-ai" ${k.ai_optimize ? 'checked' : ''}>`,
+      `${fmtNum(k.used_images)} / <input class="sm" type="number" min="0" step="1" data-field="quota_images" value="${k.quota_images}">` +
+        (k.quota_images ? '' : ' <span class="muted">不限</span>'),
+      fmtPointsMoney(k.used_points),
+      fmtTime(k.last_used_at),
+      fmtTime(k.created_at),
+      `<button class="link" data-action="save">保存</button><button class="link danger" data-action="delete">删除</button>`,
+    ]),
+    '还没有密钥，先在上面生成一个');
+  // 行上记下 id，事件委托时用
+  [...$('#keys-table').tBodies[0].rows].forEach((row, i) => { if (keys[i]) row.dataset.id = keys[i].id; });
+};
+
+$('#key-form').addEventListener('submit', action(async () => {
+  const created = await api('POST', '/keys', {
+    name: $('#key-name').value,
+    quota_images: Number($('#key-quota').value || 0),
+    ai_optimize: $('#key-ai').checked,
+  });
+  $('#key-name').value = '';
+  $('#key-quota').value = 0;
+  $('#key-ai').checked = true;
+  $('#key-dialog-name').textContent = `名称：${created.name}`;
+  $('#key-dialog-value').textContent = created.key;
+  $('#key-dialog').showModal();
+  await loaders.keys();
+}));
+$('#key-dialog-copy').addEventListener('click', () => copyText($('#key-dialog-value').textContent));
+$('#key-dialog-close').addEventListener('click', () => {
+  $('#key-dialog-value').textContent = '';
+  $('#key-dialog').close();
+});
+
+$('#keys-table').addEventListener('click', action(async (event) => {
+  const button = event.target.closest('button[data-action]');
+  const row = event.target.closest('tr[data-id]');
+  if (!button || !row) return;
+  if (button.dataset.action === 'save') {
+    await api('PATCH', `/keys/${row.dataset.id}`, {
+      name: row.querySelector('[data-field="name"]').value,
+      quota_images: Number(row.querySelector('[data-field="quota_images"]').value || 0),
+    });
+    toast('已保存');
+  } else if (button.dataset.action === 'delete') {
+    if (!confirm('删除后这把密钥立即失效，调用记录会保留。确定删除？')) return;
+    await api('DELETE', `/keys/${row.dataset.id}`);
+    toast('已删除');
+  }
+  await loaders.keys();
+}));
+$('#keys-table').addEventListener('change', action(async (event) => {
+  const { checked, dataset } = event.target;
+  const row = event.target.closest('tr[data-id]');
+  if (dataset.action === 'toggle') {
+    await api('PATCH', `/keys/${row.dataset.id}`, { enabled: checked });
+    toast(checked ? '已启用' : '已禁用');
+  } else if (dataset.action === 'toggle-ai') {
+    await api('PATCH', `/keys/${row.dataset.id}`, { ai_optimize: checked });
+    toast(checked ? '这把密钥开启了 AI 优化' : '这把密钥关闭了 AI 优化');
+  }
+}));
+
+// ---------- 上游秘钥 ----------
+
+const UPSTREAM_TYPES = { openai: 'OpenAI 兼容', novelai: 'NovelAI 官方' };
+
+/** NovelAI 官方令牌拉取模型时顺带查到的套餐和 Anlas */
+const accountText = (account) =>
+  account ? `${account.tier}${account.active ? '' : '（未订阅）'} · Anlas ${fmtNum(account.anlas)}` : '';
+
+loaders.upstream = async () => {
+  const keys = await api('GET', '/upstream-keys');
+  const now = Date.now();
+  $('#upstream-bases').innerHTML = [...new Set(keys.map((k) => k.base_url))].map((b) => `<option value="${esc(b)}">`).join('');
+  renderTable($('#upstream-keys-table'),
+    [['名称'], ['秘钥'], ['类型'], ['接口地址'], ['支持的模型'], ['所属账号'], ['启用'], ['状态'], ['调用 / 成功', 'num'], ['出图', 'num'],
+      ['扣点（估）', 'num'], ['今日出图', 'num'], ['今日扣点', 'num'], ['最近使用'], ['操作']],
+    keys.map((k) => {
+      const status = !k.enabled
+        ? '<span class="badge">已停用</span>'
+        : k.cooling_until
+          ? `<span class="badge err">冷却中，${Math.ceil((k.cooling_until - now) / 60000)} 分钟后恢复</span>`
+          : '<span class="badge ok">正常</span>';
+      const lastError = k.last_error
+        ? `<br><span class="err-text" title="${esc(k.last_error)}">${fmtTime(k.last_error_at)} ${esc(k.last_error.slice(0, 40))}</span>`
+        : '';
+      return [
+        `<input class="name" data-field="name" value="${esc(k.name)}" maxlength="50" placeholder="未命名">`,
+        `<code>${esc(k.key_hint)}</code>`,
+        `<select data-field="type">${Object.entries(UPSTREAM_TYPES).map(([value, label]) =>
+          `<option value="${value}" ${k.type === value ? 'selected' : ''}>${label}</option>`).join('')}</select>`,
+        `<input class="url" data-field="base_url" value="${esc(k.base_url)}" list="upstream-bases" required>`,
+        `<input class="md" data-field="models" value="${esc(k.models.replaceAll(',', ', '))}" placeholder="全部">`,
+        `<input class="name" data-field="account" value="${esc(k.account)}" maxlength="50" placeholder="单独计">`,
+        `<input type="checkbox" data-action="toggle" ${k.enabled ? 'checked' : ''}>`,
+        status + lastError,
+        `${fmtNum(k.calls)} / ${fmtNum(k.success)}`,
+        fmtNum(k.images),
+        fmtPointsMoney(k.points),
+        fmtNum(k.today_images),
+        fmtNum(k.today_points),
+        fmtTime(k.last_used_at),
+        `<button class="link" data-action="pull">拉取模型</button><button class="link" data-action="save">保存</button>` +
+          `<button class="link danger" data-action="delete">删除</button>`,
+      ];
+    }),
+    '还没有上游秘钥，所有调用都会失败，先在上面添加');
+  [...$('#upstream-keys-table').tBodies[0].rows].forEach((row, i) => { if (keys[i]) row.dataset.id = keys[i].id; });
+};
+
+$('#upstream-key-form').addEventListener('submit', action(async () => {
+  const { added, skipped } = await api('POST', '/upstream-keys', {
+    keys: $('#upstream-key-input').value,
+    type: $('#upstream-key-type').value,
+    base_url: $('#upstream-key-base').value,
+    models: $('#upstream-key-models').value,
+    name: $('#upstream-key-name').value,
+    account: $('#upstream-key-account').value,
+  });
+  toast(added ? `已添加 ${added} 把${skipped ? `，${skipped} 把已存在` : ''}` : '这些秘钥都已存在', !added);
+  if (added) $('#upstream-key-input').value = '';
+  await loaders.upstream();
+}));
+
+const splitModels = (text) => String(text).split(/[\s,，]+/).filter(Boolean);
+
+/**
+ * 弹框勾选这把秘钥支持的模型。models 是从上游拉到的；selected 是已经填了的，没填时全选。
+ * 手填过、上游列表里没有的也列出来，免得被悄悄去掉。确定返回勾选的列表，取消返回 null。
+ */
+function pickModels({ title, models, selected, confirmText }) {
+  const dialog = $('#models-dialog');
+  const all = [...new Set([...models, ...selected])];
+  $('#models-dialog-title').textContent = title;
+  $('#models-dialog-save').textContent = confirmText;
+  $('#models-dialog-filter').value = '';
+  $('#models-dialog-list').innerHTML = all.map((id) => `
+    <label><input type="checkbox" value="${esc(id)}" ${!selected.length || selected.includes(id) ? 'checked' : ''}>
+      ${esc(id)} ${models.includes(id) ? '' : '<span class="badge">上游列表里没有</span>'}</label>`).join('')
+    || '<p class="muted">这个上游没有返回任何模型</p>';
+  dialog.showModal();
+  return new Promise((resolve) => {
+    const done = (value) => { dialog.close(); resolve(value); };
+    $('#models-dialog-save').onclick = () =>
+      done([...dialog.querySelectorAll('#models-dialog-list input:checked')].map((el) => el.value));
+    $('#models-dialog-cancel').onclick = () => done(null);
+    dialog.oncancel = () => resolve(null); // 按 Esc
+  });
+}
+
+const visibleModelBoxes = () =>
+  [...document.querySelectorAll('#models-dialog-list label')].filter((el) => !el.hidden).map((el) => el.querySelector('input'));
+$('#models-dialog-filter').addEventListener('input', (event) => {
+  const word = event.target.value.trim().toLowerCase();
+  for (const label of document.querySelectorAll('#models-dialog-list label')) {
+    label.hidden = Boolean(word) && !label.textContent.toLowerCase().includes(word);
+  }
+});
+$('#models-dialog-all').addEventListener('click', () => { for (const box of visibleModelBoxes()) box.checked = true; });
+$('#models-dialog-none').addEventListener('click', () => { for (const box of visibleModelBoxes()) box.checked = false; });
+
+// 选 NovelAI 官方时接口地址可以留空，秘钥是 pst- 令牌
+$('#upstream-key-type').addEventListener('change', (event) => {
+  const novelai = event.target.value === 'novelai';
+  const base = $('#upstream-key-base');
+  base.required = !novelai;
+  base.placeholder = novelai ? '接口地址，留空 = https://image.novelai.net' : '接口地址，如 https://example.com/v1';
+  $('#upstream-key-input').placeholder = novelai
+    ? 'NovelAI 持久令牌 pst-...（官网 Account Settings → Get Persistent API Token），一行一个'
+    : '这个接口的 sk-...，一行一个，可以一次贴多把';
+});
+
+$('#upstream-key-pull').addEventListener('click', action(async () => {
+  const { base_url: base, models, account } = await api('POST', '/upstream-keys/models', {
+    type: $('#upstream-key-type').value,
+    base_url: $('#upstream-key-base').value,
+    keys: $('#upstream-key-input').value,
+  });
+  if (account) toast(accountText(account));
+  const input = $('#upstream-key-models');
+  const picked = await pickModels({ title: base, models, selected: splitModels(input.value), confirmText: '确定' });
+  if (picked) input.value = picked.join(', ');
+}));
+
+$('#upstream-keys-table').addEventListener('click', action(async (event) => {
+  const button = event.target.closest('button[data-action]');
+  const row = event.target.closest('tr[data-id]');
+  if (!button || !row) return;
+  if (button.dataset.action === 'pull') {
+    const { base_url: base, models, account } = await api('POST', '/upstream-keys/models', { id: Number(row.dataset.id) });
+    if (account) toast(accountText(account));
+    const name = row.querySelector('[data-field="name"]').value;
+    const picked = await pickModels({
+      title: `${name || '未命名'} · ${base}`,
+      models,
+      selected: splitModels(row.querySelector('[data-field="models"]').value),
+      confirmText: '保存',
+    });
+    if (!picked) return;
+    await api('PATCH', `/upstream-keys/${row.dataset.id}`, { models: picked.join(',') });
+    toast(picked.length ? `已保存，支持 ${picked.length} 个模型` : '已保存，什么模型都接');
+  } else if (button.dataset.action === 'save') {
+    const patch = {};
+    for (const input of row.querySelectorAll('[data-field]')) patch[input.dataset.field] = input.value;
+    await api('PATCH', `/upstream-keys/${row.dataset.id}`, patch);
+    toast('已保存');
+  } else if (button.dataset.action === 'delete') {
+    if (!confirm('删除这把上游秘钥？调用记录会保留。')) return;
+    await api('DELETE', `/upstream-keys/${row.dataset.id}`);
+    toast('已删除');
+  }
+  await loaders.upstream();
+}));
+$('#upstream-keys-table').addEventListener('change', action(async (event) => {
+  if (event.target.dataset.action !== 'toggle') return;
+  const row = event.target.closest('tr[data-id]');
+  await api('PATCH', `/upstream-keys/${row.dataset.id}`, { enabled: event.target.checked });
+  toast(event.target.checked ? '已启用' : '已停用');
+  await loaders.upstream();
+}));
+
+// ---------- 模型 ----------
+
+loaders.models = async () => {
+  const { models, default_model: defaultModel } = await api('GET', '/models');
+  renderTable($('#models-table'),
+    [['对外名称'], ['上游模型'], ['启用'], ['基础点/张'], ['每日第 N 张后'], ['之后点/张'], ['大图加点'], ['操作']],
+    models.map((m) => [
+      `${esc(m.id)}${m.id === defaultModel ? ' <span class="badge accent">默认</span>' : ''}`,
+      `<input class="md" data-field="upstream" value="${esc(m.upstream)}" list="upstream-ids">`,
+      `<input type="checkbox" data-action="toggle" ${m.enabled ? 'checked' : ''}>`,
+      `<input class="sm" type="number" min="0" step="any" data-field="price" value="${m.price}">`,
+      `<input class="sm" type="number" min="0" step="1" data-field="tier_after" value="${m.tier_after}">`,
+      `<input class="sm" type="number" min="0" step="any" data-field="tier_price" value="${m.tier_price}">`,
+      `<input class="sm" type="number" min="0" step="any" data-field="large_extra" value="${m.large_extra}">`,
+      `<button class="link" data-action="save">保存</button>` +
+        (m.id === defaultModel ? '' : `<button class="link" data-action="default">设为默认</button>`) +
+        `<button class="link danger" data-action="delete">删除</button>`,
+    ]),
+    '还没有模型，点上面“获取上游模型列表”添加');
+  [...$('#models-table').tBodies[0].rows].forEach((row, i) => { if (models[i]) row.dataset.id = models[i].id; });
+};
+
+async function addModels(items) {
+  const { added, skipped } = await api('POST', '/models', { models: items });
+  toast(added.length ? `已添加 ${added.length} 个模型${skipped.length ? `，${skipped.length} 个已存在` : ''}` : '模型已存在', !added.length);
+  await loaders.models();
+}
+
+const hostOf = (url) => { try { return new URL(url).host; } catch { return url; } };
+
+$('#upstream-fetch').addEventListener('click', action(async () => {
+  const { models, errors } = await api('GET', '/models/upstream');
+  // 接了不止一个上游时，标出每个模型来自哪个上游
+  const multi = new Set(models.flatMap((m) => m.bases)).size + errors.length > 1;
+  $('#upstream-ids').innerHTML = models.map((m) => `<option value="${esc(m.id)}">`).join('');
+  $('#upstream-list').innerHTML = models.map((m) => `
+    <label>
+      <input type="checkbox" value="${esc(m.id)}" ${m.added ? 'checked disabled' : ''}>
+      ${esc(m.id)} ${m.added ? '<span class="badge">已添加</span>' : ''}
+      ${multi ? `<span class="muted">${m.bases.map((b) => esc(hostOf(b))).join('、')}</span>` : ''}
+    </label>`).join('');
+  $('#upstream-errors').innerHTML = errors
+    .map((e) => `<p class="hint err-text">${esc(e.base_url)} 获取失败：${esc(e.error)}</p>`).join('');
+  $('#upstream-add').hidden = !models.some((m) => !m.added);
+}));
+$('#upstream-add').addEventListener('click', action(async () => {
+  const ids = [...document.querySelectorAll('#upstream-list input:checked:not(:disabled)')].map((el) => el.value);
+  if (!ids.length) throw new Error('先勾选要添加的模型');
+  await addModels(ids.map((id) => ({ id })));
+  $('#upstream-fetch').click();
+}));
+$('#model-form').addEventListener('submit', action(async () => {
+  const id = $('#model-id').value.trim();
+  await addModels([{ id, upstream: $('#model-upstream').value.trim() || id }]);
+  $('#model-id').value = '';
+  $('#model-upstream').value = '';
+}));
+
+$('#models-table').addEventListener('click', action(async (event) => {
+  const button = event.target.closest('button[data-action]');
+  const row = event.target.closest('tr[data-id]');
+  if (!button || !row) return;
+  const path = `/models/${encodeURIComponent(row.dataset.id)}`;
+  if (button.dataset.action === 'save') {
+    const patch = {};
+    for (const input of row.querySelectorAll('[data-field]')) patch[input.dataset.field] = input.value;
+    await api('PATCH', path, patch);
+    toast('已保存');
+  } else if (button.dataset.action === 'default') {
+    await api('PUT', '/settings', { default_model: row.dataset.id });
+    toast('已设为默认模型');
+  } else if (button.dataset.action === 'delete') {
+    if (!confirm(`删除模型 ${row.dataset.id}？调用记录会保留。`)) return;
+    await api('DELETE', path);
+    toast('已删除');
+  }
+  await loaders.models();
+}));
+$('#models-table').addEventListener('change', action(async (event) => {
+  if (event.target.dataset.action !== 'toggle') return;
+  const row = event.target.closest('tr[data-id]');
+  await api('PATCH', `/models/${encodeURIComponent(row.dataset.id)}`, { enabled: event.target.checked });
+  toast(event.target.checked ? '已启用' : '已停用');
+}));
+
+// ---------- AI 优化 ----------
+
+let aiPage = 1;
+const AI_SOURCES = { chat: '聊天', images: '图片接口', novelai: 'NovelAI 接口', prompt: '提词器', test: '后台测试' };
+
+loaders.ai = async () => {
+  const [settings, usage, { models }] = await Promise.all([
+    api('GET', '/settings'), api('GET', `/ai?page=${aiPage}`), api('GET', '/models'),
+  ]);
+  const form = $('#ai-form');
+  const applied = settings.ai_apply_models;
+  $('#ai-scope').value = applied.length ? 'some' : 'all';
+  $('#ai-apply-models').hidden = !applied.length;
+  $('#ai-apply-models').innerHTML = models.map((m) => `
+    <label><input type="checkbox" value="${esc(m.id)}" ${applied.includes(m.id) ? 'checked' : ''}>
+      ${esc(m.id)}${m.upstream !== m.id ? ` <span class="muted">→ ${esc(m.upstream)}</span>` : ''}
+      ${m.enabled ? '' : '<span class="badge">已停用</span>'}</label>`).join('')
+    || '<p class="muted">还没有模型，先到“模型”页添加</p>';
+  for (const name of ['ai_mode', 'ai_base_url', 'ai_model', 'ai_reasoning_effort', 'ai_price_input', 'ai_price_output',
+    'ai_price_cache_read', 'ai_price_cache_write']) {
+    form.elements[name].value = settings[name];
+  }
+  state.aiDefaultPrompt = settings.ai_default_system_prompt;
+  form.elements.ai_system_prompt.value = settings.ai_system_prompt || settings.ai_default_system_prompt;
+  form.elements.ai_tools.checked = settings.ai_tools;
+  form.elements.ai_offpeak.checked = settings.ai_offpeak;
+  form.elements.ai_api_key.value = '';
+  form.elements.ai_api_key.placeholder = settings.ai_api_key_hint ? '留空不修改' : '还没有填';
+  $('#ai-key-hint').textContent = settings.ai_api_key_hint
+    ? `当前：${settings.ai_api_key_hint}。出于安全不显示完整秘钥，填新值才会替换。`
+    : '';
+  renderAiUsage(usage);
+};
+
+function renderAiUsage({ today, total, calls }) {
+  const card = (label, a) => `
+    <div class="card"><div class="label">${label}</div><div class="value">${fmtCost(a.cost)}</div>
+      <div class="sub">${fmtNum(a.calls)} 次（成功 ${fmtNum(a.success)}）· 输入 ${fmtNum(a.input_tokens)}（缓存读 ${fmtNum(a.cache_read_tokens)} / 写 ${fmtNum(a.cache_write_tokens)}）· 输出 ${fmtNum(a.output_tokens)} tokens</div></div>`;
+  $('#ai-cards').innerHTML = card('今日 AI 优化成本', today) + card('累计 AI 优化成本', total);
+  const pages = Math.max(1, Math.ceil(calls.total / calls.pageSize));
+  $('#ai-page').textContent = `第 ${aiPage} / ${pages} 页，共 ${fmtNum(calls.total)} 次`;
+  $('#ai-prev').disabled = aiPage <= 1;
+  $('#ai-next').disabled = aiPage >= pages;
+  renderTable($('#ai-calls'),
+    [['时间'], ['来源'], ['调用密钥'], ['模型'], ['轮次 / 工具', 'num'], ['输入', 'num'], ['缓存读 / 写', 'num'], ['输出', 'num'],
+      ['成本', 'num'], ['耗时', 'num'], ['状态'], ['原文 → 结果 / 错误']],
+    calls.items.map((c) => [
+      fmtTime(c.created_at), AI_SOURCES[c.source] ?? esc(c.source), esc(c.key_name ?? '—'), esc(c.model),
+      `${fmtNum(c.rounds ?? 1)} 轮 · ${fmtNum(c.tool_calls ?? 0)} 次`,
+      fmtNum(c.input_tokens), `${fmtNum(c.cache_read_tokens)} / ${fmtNum(c.cache_write_tokens)}`, fmtNum(c.output_tokens),
+      fmtCost(c.cost), `${(Number(c.duration_ms || 0) / 1000).toFixed(1)}s`,
+      c.status === 'success' ? '<span class="badge ok">成功</span>' : '<span class="badge err">失败</span>',
+      `<span title="${esc(c.prompt)}">${esc(String(c.prompt ?? '').slice(0, 60))}</span>` +
+        (c.result ? `<br><span class="muted" title="${esc(c.result)}">→ ${esc(c.result.slice(0, 160))}</span>` : '') +
+        (c.note ? `<br><span class="muted">注：${esc(c.note)}</span>` : '') +
+        (c.error ? `<br><span class="err-text">${esc(c.error)}</span>` : ''),
+    ]),
+    '还没有调用过');
+  for (const cell of document.querySelectorAll('#ai-calls tbody td:last-child')) cell.classList.add('wrap');
+}
+
+$('#ai-prev').addEventListener('click', action(async () => { aiPage--; await loaders.ai(); }));
+$('#ai-next').addEventListener('click', action(async () => { aiPage++; await loaders.ai(); }));
+$('#ai-system-reset').addEventListener('click', () => { $('#ai-system').value = state.aiDefaultPrompt || ''; });
+$('#ai-scope').addEventListener('change', (event) => { $('#ai-apply-models').hidden = event.target.value !== 'some'; });
+
+$('#ai-form').addEventListener('submit', action(async () => {
+  const values = Object.fromEntries(new FormData($('#ai-form')));
+  if (!values.ai_api_key) delete values.ai_api_key;
+  // 没勾的复选框不在 FormData 里
+  values.ai_tools = $('#ai-tools').checked;
+  values.ai_offpeak = $('#ai-offpeak').checked;
+  const picked = [...document.querySelectorAll('#ai-apply-models input:checked')].map((el) => el.value);
+  const someModels = $('#ai-scope').value === 'some';
+  if (someModels && !picked.length) throw new Error('至少勾选一个模型，或者选“所有模型”');
+  values.ai_apply_models = someModels ? picked : [];
+  await api('PUT', '/settings', values);
+  toast('AI 优化设置已保存');
+  await loaders.ai();
+}));
+
+$('#ai-test-btn').addEventListener('click', action(async () => {
+  const box = $('#ai-test-result');
+  box.innerHTML = '<p class="muted">调用中…</p>';
+  try {
+    const r = await api('POST', '/ai/test', { text: $('#ai-test-input').value });
+    box.innerHTML = `
+      <p class="hint">用时 ${(r.duration_ms / 1000).toFixed(1)} 秒，${r.rounds} 轮请求、调用工具 ${r.tool_calls} 次；
+        输入 ${fmtNum(r.usage.input)} tokens（缓存读 ${fmtNum(r.usage.cacheRead)} / 写 ${fmtNum(r.usage.cacheWrite)}），
+        输出 ${fmtNum(r.usage.output)} tokens；成本 ${fmtCost(r.cost)}${r.note ? `<br>注：${esc(r.note)}` : ''}</p>
+      <div class="keybox">${esc(r.prompt)}${r.sentences ? `<br><br>${esc(r.sentences)}` : ''}</div>`;
+  } catch (err) {
+    box.innerHTML = `<p class="err-text">${esc(err.message)}</p>`;
+  }
+  aiPage = 1;
+  renderAiUsage(await api('GET', '/ai?page=1'));
+}));
+
+// ---------- 设置 ----------
+
+loaders.settings = async () => {
+  const [settings, { models }] = await Promise.all([api('GET', '/settings'), api('GET', '/models')]);
+  const form = $('#settings-form');
+  $('#s-default_model').innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
+  for (const name of ['default_model', 'public_base_url', 'chat_image_mode', 'image_ttl_days', 'point_price', 'hide_words']) {
+    form.elements[name].value = settings[name];
+  }
+  for (const name of ['prompt_assist', 'prompt_fix', 'prompt_echo', 'prompt_assist_nsfw']) form.elements[name].checked = settings[name];
+  const port = settings.listen_port;
+  $('#s-public_base_url-hint').innerHTML =
+    `用来拼返回给调用方的图片链接。留空时用调用方访问本服务的地址：对方用 http://服务器IP:${port} 调，链接就是这个 IP 和端口；` +
+    `经反代用域名调，就是域名。你现在访问后台用的是 <code>${esc(settings.inferred_base_url)}</code>。<br>` +
+    `API、图片链接、后台全在同一个端口 ${port} 上，反代时把整个域名转发到 <code>http://127.0.0.1:${port}</code> 即可，` +
+    `并传 Host 和 X-Forwarded-Proto 头；这样留空也能拿到正确的域名，填了则一律用这里的地址。`;
+  form.elements.new_password.value = '';
+  $('#s-password-hint').textContent = settings.password_from_env
+    ? '当前密码由环境变量 ADMIN_PASSWORD 指定，这里改了重启后会被重置回去。'
+    : '留空不修改，至少 8 位。';
+};
+
+$('#settings-form').addEventListener('submit', action(async () => {
+  const values = Object.fromEntries(new FormData($('#settings-form')));
+  // 没勾的复选框不会出现在 FormData 里，单独取
+  for (const box of $('#settings-form').querySelectorAll('input[type="checkbox"]')) values[box.name] = box.checked;
+  if (!values.new_password) delete values.new_password;
+  await api('PUT', '/settings', values);
+  toast('设置已保存');
+  await loaders.settings();
+}));
+
+// ---------- 启动 ----------
+
+window.addEventListener('hashchange', () => { if (state.token) showView(viewFromHash()); });
+if (state.token) showView(viewFromHash());
+else showLogin();
+</script>
+</body>
+</html>

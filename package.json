@@ -1,0 +1,15 @@
+{
+  "name": "nai-shengtu",
+  "version": "1.0.0",
+  "private": true,
+  "description": "NovelAI 生图中继：上游接 NovelAI 官方或 OpenAI 兼容的 NAI 生图站，对外提供 /v1/chat/completions（聊天生图）、/v1/images/generations 和 NovelAI 官方格式 /ai/generate-image，带后台管理",
+  "type": "module",
+  "main": "server.js",
+  "engines": {
+    "node": ">=22.9"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env --disable-warning=ExperimentalWarning server.js",
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  }
+}
