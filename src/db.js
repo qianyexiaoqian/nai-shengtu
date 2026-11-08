@@ -118,6 +118,8 @@ if (!logColumns.has('upstream_key_id')) db.exec('ALTER TABLE logs ADD COLUMN ups
 if (!logColumns.has('account')) db.exec('ALTER TABLE logs ADD COLUMN account TEXT');
 // 提示词里的中文转成标签后实际发给上游的提示词；和原文一样时为空
 if (!logColumns.has('final_prompt')) db.exec('ALTER TABLE logs ADD COLUMN final_prompt TEXT');
+// 上游秘钥都满了时在中继里排队等了多久（毫秒），算在 duration_ms 里
+if (!logColumns.has('queue_ms')) db.exec('ALTER TABLE logs ADD COLUMN queue_ms INTEGER NOT NULL DEFAULT 0');
 
 // 调用密钥能不能用 AI 提示词优化：0 = 不能（写 --ai 也不行），1 = 按后台的 AI 设置走
 const keyColumns = new Set(db.prepare('PRAGMA table_info(api_keys)').all().map((c) => c.name));
@@ -130,6 +132,11 @@ if (!upstreamColumns.has('base_url')) db.exec("ALTER TABLE upstream_keys ADD COL
 if (!upstreamColumns.has('models')) db.exec("ALTER TABLE upstream_keys ADD COLUMN models TEXT NOT NULL DEFAULT ''");
 // 上游类型：openai = OpenAI 兼容的 /images/generations；novelai = NovelAI 官方接口（/ai/generate-image）
 if (!upstreamColumns.has('type')) db.exec("ALTER TABLE upstream_keys ADD COLUMN type TEXT NOT NULL DEFAULT 'openai'");
+// 每把秘钥同时最多几个请求，0 = 不限；超出的请求排队（见 queue.js）。官方秘钥同一账号不能并发，默认 1
+if (!upstreamColumns.has('concurrency')) {
+  db.exec('ALTER TABLE upstream_keys ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 0');
+  db.exec("UPDATE upstream_keys SET concurrency = 1 WHERE type = 'novelai'");
+}
 
 // 有的上游直接返回 b64_json 不给链接：图片存到数据目录，file 是文件名，mime 是类型
 const imageColumns = new Set(db.prepare('PRAGMA table_info(images)').all().map((c) => c.name));

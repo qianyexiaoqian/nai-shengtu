@@ -39,7 +39,7 @@ export function estimatePoints(model, images, size, usedToday) {
  */
 export function recordCall({
   key, endpoint, model, prompt, finalPrompt = null, size, n, images = 0, status, error = null, durationMs, ip,
-  upstreamKeyId = null, account = null,
+  upstreamKeyId = null, account = null, queueMs = 0,
 }) {
   const now = Date.now();
   const day = beijingDay(now);
@@ -56,12 +56,12 @@ export function recordCall({
     const { lastInsertRowid } = db
       .prepare(`
         INSERT INTO logs (created_at, day, key_id, key_name, endpoint, model, upstream_model, family, prompt, final_prompt,
-                          size, n, images, points, status, error, duration_ms, ip, upstream_key_id, account)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+                          size, n, images, points, status, error, duration_ms, ip, upstream_key_id, account, queue_ms)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         now, day, key.id, key.name, endpoint, model.id, model.upstream, family, String(prompt).slice(0, 2000),
         finalPrompt && finalPrompt !== prompt ? String(finalPrompt).slice(0, 2000) : null,
-        size, n, images, points, status, error, durationMs, ip, upstreamKeyId, account,
+        size, n, images, points, status, error, durationMs, ip, upstreamKeyId, account, Math.round(queueMs ?? 0),
       );
     db.prepare('UPDATE api_keys SET used_images = used_images + ?, used_points = used_points + ?, last_used_at = ? WHERE id = ?')
       .run(images, points, now, key.id);
@@ -179,7 +179,7 @@ export function listLogs({ page = 1, pageSize = 20, keyId, status } = {}) {
   const items = db
     .prepare(`SELECT l.id, l.created_at, l.key_id, COALESCE(k.name, l.key_name) AS key_name, l.endpoint, l.model,
                      l.upstream_model, l.prompt, l.final_prompt, l.size, l.n, l.images, l.points, l.status, l.error,
-                     l.duration_ms, l.ip,
+                     l.duration_ms, l.queue_ms, l.ip,
                      COALESCE(NULLIF(u.name, ''), '#' || l.upstream_key_id) AS upstream_key_name,
                      a.model AS ai_model, a.input_tokens AS ai_input_tokens, a.output_tokens AS ai_output_tokens,
                      a.cost AS ai_cost

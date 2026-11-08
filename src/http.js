@@ -101,6 +101,15 @@ export function inferredBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
+/** 调用方在响应发完之前断开连接时触发：还在排队的请求就不用再等了 */
+export function closeSignal(res) {
+  const controller = new AbortController();
+  res.on('close', () => {
+    if (!res.writableFinished) controller.abort();
+  });
+  return controller.signal;
+}
+
 export function clientIp(req) {
   return firstValue(req.headers['x-forwarded-for']) || req.socket.remoteAddress || '';
 }

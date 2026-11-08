@@ -6,6 +6,7 @@ import { createKey, deleteKey, listKeys, updateKey } from './keys.js';
 import {
   addModels, deleteModel, listModelRows, pullUpstreamModels, resolveModel, updateModel, upstreamModelOptions,
 } from './models.js';
+import { queueSnapshot } from './queue.js';
 import { convertText } from './tags.js';
 import { getSettings, saveSettings } from './settings.js';
 import { addUpstreamKeys, deleteUpstreamKey, listUpstreamKeys, updateUpstreamKey } from './upstreamKeys.js';
@@ -38,6 +39,7 @@ const ROUTES = [
   ['POST', /^\/keys$/, ({ body }) => createKey(body)],
   ['PATCH', /^\/keys\/(\d+)$/, ({ params, body }) => updateKey(Number(params[0]), body)],
   ['DELETE', /^\/keys\/(\d+)$/, ({ params }) => deleteKey(Number(params[0]))],
+  ['GET', /^\/queue$/, () => queueSnapshot()],
   ['GET', /^\/upstream-keys$/, () => listUpstreamKeys()],
   ['POST', /^\/upstream-keys$/, ({ body }) => addUpstreamKeys(body)],
   ['POST', /^\/upstream-keys\/models$/, ({ body }) => pullUpstreamModels(body)],
@@ -134,6 +136,8 @@ function settingsView(req) {
     image_ttl_days: s.imageTtlDays,
     point_price: s.pointPrice,
     hide_words: s.hideWords.join(','),
+    queue_timeout: s.queueTimeoutMs / 1000,
+    queue_max: s.queueMax,
     prompt_assist: s.promptAssist,
     prompt_assist_nsfw: s.promptAssistNsfw,
     prompt_fix: s.promptFix,
@@ -180,6 +184,16 @@ function updateSettings(req, body) {
     values.point_price = price;
   }
   if (body.hide_words !== undefined) values.hide_words = String(body.hide_words);
+  if (body.queue_timeout !== undefined) {
+    const seconds = Number(body.queue_timeout);
+    if (!Number.isInteger(seconds) || seconds < 10 || seconds > 3600) throw new HttpError(400, '排队最长等待需为 10～3600 秒');
+    values.queue_timeout = seconds;
+  }
+  if (body.queue_max !== undefined) {
+    const max = Number(body.queue_max);
+    if (!Number.isInteger(max) || max < 0 || max > 10000) throw new HttpError(400, '最多排队数需为 0～10000 的整数，0 表示不限');
+    values.queue_max = max;
+  }
   for (const flag of ['prompt_assist', 'prompt_assist_nsfw', 'prompt_fix', 'prompt_echo']) {
     if (body[flag] !== undefined) values[flag] = [true, '1', 1, 'on'].includes(body[flag]) ? '1' : '0';
   }

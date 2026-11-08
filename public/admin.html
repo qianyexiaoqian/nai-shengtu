@@ -33,6 +33,9 @@
   .card .label { color: var(--muted); font-size: 12px; }
   .card .value { margin-top: 4px; font-size: 24px; font-weight: 600; font-variant-numeric: tabular-nums; }
   .card .sub { min-height: 18px; color: var(--muted); font-size: 12px; }
+  .meter { display: inline-block; width: 80px; height: 6px; margin-left: 8px; border-radius: 3px; background: var(--border); vertical-align: middle; overflow: hidden; }
+  .meter > span { display: block; height: 100%; background: var(--accent); }
+  .meter.full > span { background: var(--err); }
   .panel { margin-top: 16px; padding: 16px; }
   .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 0 16px; }
   .table-wrap { overflow-x: auto; }
@@ -112,6 +115,7 @@
     <button data-view="logs">调用日志</button>
     <button data-view="keys">调用密钥</button>
     <button data-view="upstream">上游秘钥</button>
+    <button data-view="queue">排队</button>
     <button data-view="models">模型</button>
     <button data-view="ai">AI 优化</button>
     <button data-view="settings">设置</button>
@@ -196,6 +200,7 @@
           <input id="upstream-key-name" class="md" placeholder="名称（可选），如：主账号">
           <input id="upstream-key-account" class="md" placeholder="所属账号（可选）">
           <input id="upstream-key-models" class="url" placeholder="支持的模型（可选，逗号分隔）">
+          <input id="upstream-key-concurrency" class="sm" type="number" min="0" max="100" step="1" placeholder="并发" title="这把秘钥同时最多出几张图，0 = 不限；留空：NovelAI 官方 1，OpenAI 兼容不限">
           <button type="button" id="upstream-key-pull" title="用上面填的接口地址和第一把秘钥查这个上游有哪些模型">拉取模型</button>
           <button class="primary" type="submit">添加</button>
         </div>
@@ -210,6 +215,10 @@
         “支持的模型”是上游模型名（模型页“上游模型”那一列）：请求这些模型时才会轮到这把秘钥；留空表示什么模型都接。
         点“拉取模型”从这个上游的 /models 拉出列表打勾就行（NovelAI 官方列内置的官方模型，同时查套餐和 Anlas 余额），也可以手填，逗号分隔；
         列表里的秘钥也能单独拉取。接了好几个上游、各家模型不一样时，每把都填上，免得请求被发到没有这个模型的上游。
+      </p>
+      <p class="hint">
+        “并发”是这把秘钥同时最多出几张图，留空时 NovelAI 官方是 1、OpenAI 兼容不限（0）。能接这个模型的秘钥都满了时，
+        请求排队等（见“排队”页），不会直接失败。
       </p>
       <p class="hint">
         支持某个模型的秘钥按顺序轮询。某把秘钥被上游拒绝（401 失效、402 点数不足、403 不允许该模型、429 限流）时，自动换下一把重试，
@@ -227,6 +236,39 @@
     <div class="panel">
       <h2>上游秘钥列表</h2>
       <div class="table-wrap"><table id="upstream-keys-table"></table></div>
+    </div>
+  </section>
+
+  <!-- 排队 -->
+  <section class="view" id="view-queue" hidden>
+    <div class="row">
+      <select id="queue-filter" title="只看哪些上游">
+        <option value="all">全部上游</option>
+        <option value="novelai">NovelAI 官方</option>
+        <option value="openai">OpenAI 兼容</option>
+      </select>
+      <label class="row"><input type="checkbox" id="queue-live" checked> 实时刷新（每秒）</label>
+      <span class="spacer"></span>
+      <span class="muted" id="queue-updated"></span>
+    </div>
+    <div class="cards" id="queue-cards" style="margin-top:8px"></div>
+    <div class="panel">
+      <h2>上游并发</h2>
+      <div class="table-wrap"><table id="queue-keys"></table></div>
+    </div>
+    <div class="panel">
+      <h2>正在出图</h2>
+      <div class="table-wrap"><table id="queue-running"></table></div>
+    </div>
+    <div class="panel">
+      <h2>排队中</h2>
+      <div class="table-wrap"><table id="queue-waiting"></table></div>
+      <p class="hint">
+        每把上游秘钥同时最多出几张图在“上游秘钥”页的“并发”里设（NovelAI 官方默认 1，官方不让同一账号并发；0 表示不限）。
+        能接这个模型的秘钥都满了时，请求在这里按到达顺序排队，有秘钥空出来就发下一个；排在前面的模型没空位不挡后面别的模型。
+        某把秘钥失败换下一把时，请求回到原来的位次。排队最长等待和最多排队数在“设置”里改；调用方断开连接的请求自动移出队列。
+        选“NovelAI 官方”等时，排队中只列能分到这些上游的请求。
+      </p>
     </div>
   </section>
 
@@ -391,6 +433,15 @@
         <label for="s-hide_words">错误信息隐藏词</label>
         <input id="s-hide_words" name="hide_words">
         <p class="hint">逗号分隔。上游返回的错误信息里出现这些词会替换成 ***；网址、域名、邮箱、IP 总会被隐藏。</p>
+      </div>
+      <h2>排队</h2>
+      <div class="form-grid">
+        <label for="s-queue_timeout">最长等待</label>
+        <div class="row"><input id="s-queue_timeout" name="queue_timeout" class="sm" type="number" min="10" max="3600" step="1"> 秒</div>
+        <p class="hint">上游秘钥都满了时请求排队，超过这个时间还没轮到就返回 503。非流式的客户端自己的超时可能更短，流式聊天会一直发保活。</p>
+        <label for="s-queue_max">最多排队</label>
+        <div class="row"><input id="s-queue_max" name="queue_max" class="sm" type="number" min="0" max="10000" step="1"> 个</div>
+        <p class="hint">排队的请求超过这个数，新请求直接返回 503。0 表示不限。</p>
       </div>
       <h2>提词</h2>
       <div class="form-grid">
@@ -678,7 +729,8 @@ async function loadLogsPage() {
       `${fmtNum(l.images)} / ${fmtNum(l.n)}`,
       l.status === 'success' ? '<span class="badge ok">成功</span>' : '<span class="badge err">失败</span>',
       fmtNum(l.points),
-      `${(Number(l.duration_ms || 0) / 1000).toFixed(1)}s`,
+      `${(Number(l.duration_ms || 0) / 1000).toFixed(1)}s` +
+        (l.queue_ms >= 1000 ? `<br><span class="muted">排队 ${(l.queue_ms / 1000).toFixed(0)}s</span>` : ''),
       `<span title="${esc(l.prompt)}">${esc(String(l.prompt ?? '').slice(0, 80))}</span>` +
         (l.final_prompt ? `<br><span class="muted" title="${esc(l.final_prompt)}">→ ${esc(l.final_prompt.slice(0, 120))}</span>` : '') +
         (l.ai_model ? `<br><span class="badge accent">AI 优化</span> <span class="muted">${esc(l.ai_model)} · ${fmtNum(l.ai_input_tokens)} / ${fmtNum(l.ai_output_tokens)} tokens · ${fmtCost(l.ai_cost)}</span>` : '') +
@@ -782,7 +834,7 @@ loaders.upstream = async () => {
   const now = Date.now();
   $('#upstream-bases').innerHTML = [...new Set(keys.map((k) => k.base_url))].map((b) => `<option value="${esc(b)}">`).join('');
   renderTable($('#upstream-keys-table'),
-    [['名称'], ['秘钥'], ['类型'], ['接口地址'], ['支持的模型'], ['所属账号'], ['启用'], ['状态'], ['调用 / 成功', 'num'], ['出图', 'num'],
+    [['名称'], ['秘钥'], ['类型'], ['接口地址'], ['支持的模型'], ['所属账号'], ['并发'], ['启用'], ['状态'], ['调用 / 成功', 'num'], ['出图', 'num'],
       ['扣点（估）', 'num'], ['今日出图', 'num'], ['今日扣点', 'num'], ['最近使用'], ['操作']],
     keys.map((k) => {
       const status = !k.enabled
@@ -801,6 +853,7 @@ loaders.upstream = async () => {
         `<input class="url" data-field="base_url" value="${esc(k.base_url)}" list="upstream-bases" required>`,
         `<input class="md" data-field="models" value="${esc(k.models.replaceAll(',', ', '))}" placeholder="全部">`,
         `<input class="name" data-field="account" value="${esc(k.account)}" maxlength="50" placeholder="单独计">`,
+        `<input class="sm" type="number" min="0" max="100" step="1" data-field="concurrency" value="${k.concurrency}" title="0 = 不限">`,
         `<input type="checkbox" data-action="toggle" ${k.enabled ? 'checked' : ''}>`,
         status + lastError,
         `${fmtNum(k.calls)} / ${fmtNum(k.success)}`,
@@ -823,6 +876,7 @@ $('#upstream-key-form').addEventListener('submit', action(async () => {
     type: $('#upstream-key-type').value,
     base_url: $('#upstream-key-base').value,
     models: $('#upstream-key-models').value,
+    concurrency: $('#upstream-key-concurrency').value,
     name: $('#upstream-key-name').value,
     account: $('#upstream-key-account').value,
   });
@@ -927,6 +981,105 @@ $('#upstream-keys-table').addEventListener('change', action(async (event) => {
   toast(event.target.checked ? '已启用' : '已停用');
   await loaders.upstream();
 }));
+
+// ---------- 排队 ----------
+
+const fmtSeconds = (ms) => {
+  const s = Math.max(0, Math.floor(ms / 1000));
+  return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
+};
+const queueSize = (job) => `${esc(job.size)}${job.n > 1 ? ` × ${job.n}` : ''}`;
+const queuePrompt = (job) => `<span class="muted" title="${esc(job.prompt ?? '')}">${esc(String(job.prompt ?? '').slice(0, 60))}</span>`;
+let queueBusy = false;
+
+loaders.queue = async () => {
+  if (queueBusy) return;
+  queueBusy = true;
+  try {
+    renderQueue(await api('GET', '/queue'));
+    $('#queue-updated').textContent = `更新于 ${new Date().toLocaleTimeString('zh-CN', { hour12: false })}`;
+  } catch (err) {
+    $('#queue-updated').textContent = `刷新失败：${err.message}`;
+    throw err;
+  } finally {
+    queueBusy = false;
+  }
+};
+
+function renderQueue({ now, keys, running, waiting }) {
+  // 下拉里补上每把秘钥，选中的保留
+  const select = $('#queue-filter');
+  const chosen = select.value;
+  select.innerHTML = `<option value="all">全部上游</option><option value="novelai">NovelAI 官方</option><option value="openai">OpenAI 兼容</option>` +
+    (keys.length ? `<optgroup label="单把秘钥">${keys.map((k) =>
+      `<option value="key:${k.id}">${esc(k.name)}（${UPSTREAM_TYPES[k.type] ?? esc(k.type)}）</option>`).join('')}</optgroup>` : '');
+  select.value = [...select.options].some((o) => o.value === chosen) ? chosen : 'all';
+
+  const filter = select.value;
+  const byId = new Map(keys.map((k) => [k.id, k]));
+  const matches = (key) => key && (filter === 'all' || filter === key.type || filter === `key:${key.id}`);
+  const shownKeys = keys.filter(matches);
+  const shownRunning = running.filter((job) => matches(byId.get(job.key_id) ?? { id: job.key_id, type: job.key_type }));
+  const shownWaiting = waiting.filter((job) => job.candidates.some((id) => matches(byId.get(id))));
+
+  const unlimited = shownKeys.some((k) => !k.concurrency);
+  const capacity = shownKeys.reduce((sum, k) => sum + (k.concurrency || 0), 0);
+  const busy = shownKeys.reduce((sum, k) => sum + k.active, 0);
+  const longest = shownWaiting.reduce((max, job) => Math.max(max, now - job.created_at), 0);
+  const cards = [
+    ['正在出图', fmtNum(shownRunning.length), unlimited ? '有秘钥不限并发' : `并发上限 ${capacity}`],
+    ['空闲并发', unlimited ? '不限' : fmtNum(Math.max(0, capacity - busy)), `${shownKeys.length} 把秘钥`],
+    ['排队中', fmtNum(shownWaiting.length), shownWaiting.length ? `全部排队 ${waiting.length} 个` : '没有排队'],
+    ['最长等待', shownWaiting.length ? fmtSeconds(longest) : '—', ''],
+  ];
+  $('#queue-cards').innerHTML = cards.map(([label, value, sub]) =>
+    `<div class="card"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${esc(sub)}</div></div>`).join('');
+
+  renderTable($('#queue-keys'),
+    [['上游秘钥'], ['类型'], ['正在出图 / 并发上限'], ['状态']],
+    shownKeys.map((k) => {
+      const full = k.concurrency > 0 && k.active >= k.concurrency;
+      const meter = k.concurrency > 0
+        ? `<span class="meter ${full ? 'full' : ''}"><span style="width:${Math.min(100, (k.active / k.concurrency) * 100)}%"></span></span>`
+        : '';
+      return [
+        esc(k.name),
+        UPSTREAM_TYPES[k.type] ?? esc(k.type),
+        `${k.active} / ${k.concurrency || '不限'}${meter}`,
+        k.cooling ? '<span class="badge err">冷却中</span>' : full ? '<span class="badge">已满</span>' : '<span class="badge ok">有空位</span>',
+      ];
+    }),
+    '没有启用的上游秘钥');
+
+  renderTable($('#queue-running'),
+    [['#'], ['上游秘钥'], ['调用密钥'], ['接口'], ['模型'], ['尺寸'], ['出图中', 'num'], ['排队了', 'num'], ['提示词']],
+    shownRunning.map((job) => [
+      job.id, esc(job.key_name), esc(job.caller ?? '—'), ENDPOINTS[job.endpoint] ?? esc(job.endpoint ?? '—'),
+      esc(job.model ?? job.upstream_model), queueSize(job), fmtSeconds(now - job.started_at),
+      job.queue_ms >= 1000 ? fmtSeconds(job.queue_ms) : '—', queuePrompt(job),
+    ]),
+    '现在没有在出图的请求');
+
+  renderTable($('#queue-waiting'),
+    [['位次', 'num'], ['调用密钥'], ['接口'], ['模型'], ['尺寸'], ['已等', 'num'], ['能用的上游'], ['提示词']],
+    shownWaiting.map((job) => [
+      job.position,
+      esc(job.caller ?? '—'),
+      ENDPOINTS[job.endpoint] ?? esc(job.endpoint ?? '—'),
+      esc(job.model ?? job.upstream_model),
+      queueSize(job),
+      fmtSeconds(now - job.created_at),
+      job.candidates.map((id) => esc(byId.get(id)?.name ?? `#${id}`)).join('、') +
+        (job.retry ? ' <span class="badge">换秘钥重排</span>' : ''),
+      queuePrompt(job),
+    ]),
+    '没有排队的请求');
+}
+
+$('#queue-filter').addEventListener('change', () => loaders.queue().catch(() => {}));
+setInterval(() => {
+  if (state.token && state.view === 'queue' && $('#queue-live').checked && !document.hidden) loaders.queue().catch(() => {});
+}, 1000);
 
 // ---------- 模型 ----------
 
@@ -1117,7 +1270,8 @@ loaders.settings = async () => {
   const [settings, { models }] = await Promise.all([api('GET', '/settings'), api('GET', '/models')]);
   const form = $('#settings-form');
   $('#s-default_model').innerHTML = models.map((m) => `<option value="${esc(m.id)}">${esc(m.id)}</option>`).join('');
-  for (const name of ['default_model', 'public_base_url', 'chat_image_mode', 'image_ttl_days', 'point_price', 'hide_words']) {
+  for (const name of ['default_model', 'public_base_url', 'chat_image_mode', 'image_ttl_days', 'point_price', 'hide_words',
+    'queue_timeout', 'queue_max']) {
     form.elements[name].value = settings[name];
   }
   for (const name of ['prompt_assist', 'prompt_fix', 'prompt_echo', 'prompt_assist_nsfw']) form.elements[name].checked = settings[name];

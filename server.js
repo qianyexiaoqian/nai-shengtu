@@ -4,7 +4,7 @@ import { networkInterfaces } from 'node:os';
 import { handleAdminApi, initAdminPassword } from './src/admin.js';
 import { handleChat } from './src/chat.js';
 import { config } from './src/config.js';
-import { CORS_HEADERS, HttpError, clientIp, readJson, requestBaseUrl, sendError, sendJson } from './src/http.js';
+import { CORS_HEADERS, HttpError, clientIp, closeSignal, readJson, requestBaseUrl, sendError, sendJson } from './src/http.js';
 import { handleImageProxy, purgeExpiredImages } from './src/imageStore.js';
 import { handleImages } from './src/images.js';
 import { authenticate } from './src/keys.js';
@@ -18,7 +18,7 @@ const ADMIN_PAGE = new URL('./public/admin.html', import.meta.url);
 const PROMPT_PAGE = new URL('./public/prompt.html', import.meta.url);
 
 const withKeyAndBody = (handler) => async (req, res) => {
-  const ctx = { key: authenticate(req), baseUrl: requestBaseUrl(req), ip: clientIp(req) };
+  const ctx = { key: authenticate(req), baseUrl: requestBaseUrl(req), ip: clientIp(req), signal: closeSignal(res) };
   await handler(res, await readJson(req), ctx);
 };
 

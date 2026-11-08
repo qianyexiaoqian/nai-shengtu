@@ -16,6 +16,9 @@ const DEFAULTS = {
   // 每点折合多少元，按自己上游的充值价格在后台填；0 = 不折算金额
   point_price: '0',
   hide_words: '',
+  // 上游秘钥都满了时的排队：最多等多少秒、最多排多少个（0 = 不限）
+  queue_timeout: '300',
+  queue_max: '100',
   // 提示词里的中文自动转成 Danbooru 标签；是否允许转出 NSFW 标签；英文标签自动纠错；
   // 转换或纠错后在聊天回复里附上实际提示词
   prompt_assist: '1',
@@ -61,6 +64,8 @@ export function getSettings() {
       pointPrice: Number(s.point_price) || 0,
       // 上游错误信息里额外要隐藏的词；网址、域名、邮箱、IP 总会被隐藏
       hideWords: s.hide_words.split(/[,，\n]/).map((w) => w.trim()).filter(Boolean),
+      queueTimeoutMs: (Number(s.queue_timeout) || 300) * 1000,
+      queueMax: Number.isInteger(Number(s.queue_max)) ? Math.max(0, Number(s.queue_max)) : 100,
       promptAssist: s.prompt_assist === '1',
       promptAssistNsfw: s.prompt_assist_nsfw === '1',
       promptFix: s.prompt_fix === '1',

@@ -1,5 +1,5 @@
 import { executeGeneration, prepareGeneration } from './generate.js';
-import { CORS_HEADERS, HttpError, clientIp, parseJsonObject, readBody, requestBaseUrl, sendJson } from './http.js';
+import { CORS_HEADERS, HttpError, clientIp, closeSignal, parseJsonObject, readBody, requestBaseUrl, sendJson } from './http.js';
 import { imageBase64 } from './imageStore.js';
 import { authenticate } from './keys.js';
 import { parsePromptText } from './params.js';
@@ -22,7 +22,7 @@ export async function handleNaiGenerate(req, res) {
   await withNaiErrors(res, async () => {
     const key = authenticate(req);
     const body = await readNaiBody(req);
-    const job = prepareNai({ key, baseUrl: requestBaseUrl(req), ip: clientIp(req) }, body);
+    const job = prepareNai({ key, baseUrl: requestBaseUrl(req), ip: clientIp(req), signal: closeSignal(res) }, body);
     const { images } = await executeGeneration(job);
     const files = await Promise.all(images.map(imageBase64));
     if (acceptsOnlyJson(req.headers.accept)) {

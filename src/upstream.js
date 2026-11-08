@@ -4,8 +4,9 @@ import { HttpError } from './http.js';
 import {
   NOVELAI_ACCOUNT_API, NOVELAI_BASE, NOVELAI_MODELS, novelaiAccount, novelaiBody, novelaiImages, novelaiRequest,
 } from './novelai.js';
+import { acquireKey, createJob, releaseKey } from './queue.js';
 import { getSettings } from './settings.js';
-import { allBaseUrls, markKeyFailed, markKeyUsed, upstreamBases, upstreamKeyOrder, withKey } from './upstreamKeys.js';
+import { allBaseUrls, candidateKeys, markKeyFailed, markKeyUsed, upstreamBases } from './upstreamKeys.js';
 
 // 这些状态说明是这把上游秘钥的问题（失效、点数不足、不允许该模型、限流），上游没出图也没扣点，换下一把重试。
 // 超时、5xx 不切换：上游可能已经出图扣点，重试会重复扣费。
@@ -19,33 +20,47 @@ const UNAVAILABLE = '生图失败：服务暂时不可用，请联系管理员';
  * 在支持这个模型的上游秘钥里轮询，按秘钥的类型调它的接口地址（OpenAI 兼容的 /images/generations，
  * 或 NovelAI 官方的 /ai/generate-image），遇到秘钥自身的问题自动换下一把。
  * 统一返回 OpenAI 格式：图片在 data[].url（上游地址，不能直接给调用方，见 imageStore.js）或 data[].b64_json 里。
- * 返回 { body, upstreamKey }；失败抛出的错误上带 upstreamKey（最后尝试的那把）。
+ * 秘钥按并发上限取，都满了在号池里排队（见 queue.js）；signal 断开时取消排队，info 给后台排队列表显示。
+ * 返回 { body, upstreamKey, queueMs }；失败抛出的错误上带 upstreamKey（最后尝试的那把）和 queueMs（排队等了多久）。
  */
-export async function generateImages(payload) {
-  const keys = upstreamKeyOrder(payload.model);
-  if (!keys.length) {
-    throw new HttpError(503, '服务暂未就绪，请联系管理员', {
-      type: 'server_error',
-      code: 'not_configured',
-      internal: `没有能用的上游秘钥（或者都不支持模型 ${payload.model}），请在后台“上游秘钥”页添加、启用，或者给秘钥加上这个模型`,
-    });
-  }
+export async function generateImages(payload, { signal, info } = {}) {
+  const notConfigured = () => new HttpError(503, '服务暂未就绪，请联系管理员', {
+    type: 'server_error',
+    code: 'not_configured',
+    internal: `没有能用的上游秘钥（或者都不支持模型 ${payload.model}），请在后台“上游秘钥”页添加、启用，或者给秘钥加上这个模型`,
+  });
+  if (!candidateKeys(payload.model).length) throw notConfigured();
+  const job = createJob(payload.model, {
+    signal,
+    info: { upstream_model: payload.model, size: payload.size ?? '1024x1024', n: payload.n ?? 1, ...info },
+  });
   let lastError;
-  for (const key of keys) {
+  for (;;) {
+    let key;
     try {
-      const body = await withKey(key, () =>
-        key.type === 'novelai' ? requestNovelai(key, payload) : requestGeneration(key, payload));
+      key = await acquireKey(job);
+    } catch (err) {
+      err.upstreamKey = lastError?.upstreamKey;
+      err.queueMs = job.queueMs;
+      throw err;
+    }
+    if (!key) break;
+    try {
+      const body = key.type === 'novelai' ? await requestNovelai(key, payload) : await requestGeneration(key, payload);
       markKeyUsed(key);
-      return { body, upstreamKey: key };
+      return { body, upstreamKey: key, queueMs: job.queueMs };
     } catch (err) {
       err.upstreamKey = key;
+      err.queueMs = job.queueMs;
       const missing = isModelMissing(err);
       if (!missing && !FAILOVER_STATUSES.has(err.upstreamStatus)) throw err;
       markKeyFailed(key, err.upstreamStatus, err.internal ?? err.message, !missing);
       lastError = err;
+    } finally {
+      releaseKey(job);
     }
   }
-  throw lastError;
+  throw lastError ?? notConfigured();
 }
 
 /**

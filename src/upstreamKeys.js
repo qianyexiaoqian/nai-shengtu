@@ -7,11 +7,12 @@ import { beijingDay } from './usage.js';
 // 上游 401/402/403 多半是这把秘钥失效、点数不足或不允许该模型，冷却久一点；429 是限流，很快能恢复
 const COOLDOWN_MS = { 429: 60_000, default: 10 * 60_000 };
 const cooldowns = new Map(); // 秘钥 id → 冷却到期时间，只在内存里，重启清零
-// NovelAI 官方同一个账号同时只能生成一张，并发会被 429 拒绝：同一把官方秘钥的请求排队一个个发
-const queues = new Map(); // 秘钥 id → 排在最后的那个请求
 let cursor = 0;
 
 export const UPSTREAM_TYPES = ['openai', 'novelai'];
+// 每把秘钥同时最多几个请求，0 = 不限。NovelAI 官方同一个账号同时只能生成一张（并发会被 429 拒绝），默认 1
+const DEFAULT_CONCURRENCY = { openai: 0, novelai: 1 };
+const MAX_CONCURRENCY = 100;
 
 export const keyHint = (key) => `${key.slice(0, 6)}…${key.slice(-4)}`;
 
@@ -20,36 +21,32 @@ export const accountOf = (row) => row.account?.trim() || `#${row.id}`;
 
 const supportedModels = (row) => (row.models ? row.models.split(',') : []);
 
-/**
- * 这次请求依次尝试的秘钥：只取支持这个上游模型的（没限定模型的秘钥什么都接），
- * 从轮询游标开始转一圈，正在出图的官方秘钥往后排，冷却中的排到最后（其它秘钥都失败时仍会再试，避免全部冷却时直接不可用）。
- */
-export function upstreamKeyOrder(model) {
-  const keys = db.prepare('SELECT * FROM upstream_keys WHERE enabled = 1 ORDER BY id').all()
+export const isCooling = (id, now = Date.now()) => (cooldowns.get(id) ?? 0) > now;
+
+/** 能接这个上游模型的已启用秘钥（没限定模型的秘钥什么都接），按 id 排 */
+export function candidateKeys(model) {
+  return db.prepare('SELECT * FROM upstream_keys WHERE enabled = 1 ORDER BY id').all()
     .filter((k) => !model || !k.models || supportedModels(k).includes(model));
-  if (!keys.length) return [];
-  const start = cursor++ % keys.length;
-  const rotated = [...keys.slice(start), ...keys.slice(0, start)];
-  const now = Date.now();
-  const cooling = (k) => (cooldowns.get(k.id) ?? 0) > now;
-  const busy = (k) => queues.has(k.id);
-  return [
-    ...rotated.filter((k) => !cooling(k) && !busy(k)),
-    ...rotated.filter((k) => !cooling(k) && busy(k)),
-    ...rotated.filter(cooling),
-  ];
 }
 
-/** 用这把秘钥调上游：官方秘钥排队，前一个请求结束（成功失败都算）才发下一个；别的类型直接调 */
-export function withKey(row, fn) {
-  if (row.type !== 'novelai') return fn();
-  const run = (queues.get(row.id) ?? Promise.resolve()).then(fn);
-  const tail = run.catch(() => {});
-  queues.set(row.id, tail);
-  tail.then(() => {
-    if (queues.get(row.id) === tail) queues.delete(row.id);
-  });
-  return run;
+/** 轮询起点：每个请求从下一把开始 */
+export const nextRotation = () => cursor++;
+
+/** 从 start 开始转一圈 */
+export function rotate(keys, start) {
+  if (!keys.length) return keys;
+  const i = start % keys.length;
+  return [...keys.slice(i), ...keys.slice(0, i)];
+}
+
+/**
+ * 这次请求依次尝试的秘钥：从轮询游标开始转一圈，冷却中的排到最后
+ * （其它秘钥都失败时仍会再试，避免全部冷却时直接不可用）。实际取秘钥时还要看并发，见 queue.js。
+ */
+export function upstreamKeyOrder(model) {
+  const rotated = rotate(candidateKeys(model), nextRotation());
+  const now = Date.now();
+  return [...rotated.filter((k) => !isCooling(k.id, now)), ...rotated.filter((k) => isCooling(k.id, now))];
 }
 
 /** 已启用秘钥的接口地址（按类型 + 地址去重），每个地址带一把秘钥，用来查模型列表 */
@@ -100,7 +97,7 @@ export function listUpstreamKeys() {
   const now = Date.now();
   return db
     .prepare(`
-      SELECT u.id, u.name, u.key, u.type, u.base_url, u.models, u.account, u.enabled, u.created_at, u.last_used_at,
+      SELECT u.id, u.name, u.key, u.type, u.base_url, u.models, u.account, u.concurrency, u.enabled, u.created_at, u.last_used_at,
              u.last_error, u.last_error_at,
              COUNT(l.id) AS calls,
              COALESCE(SUM(l.status = 'success'), 0) AS success,
@@ -118,7 +115,7 @@ export function listUpstreamKeys() {
 }
 
 /** keys 可以一次贴多把（换行或逗号分隔），都用同一个类型和接口地址；已存在的跳过 */
-export function addUpstreamKeys({ keys, type, base_url: baseUrl, name = '', account = '', models = '' } = {}) {
+export function addUpstreamKeys({ keys, type, base_url: baseUrl, name = '', account = '', models = '', concurrency } = {}) {
   const list = String(keys ?? '').split(/[\s,，]+/).filter(Boolean);
   if (!list.length) throw new HttpError(400, '请填写上游秘钥');
   for (const key of list) {
@@ -127,12 +124,14 @@ export function addUpstreamKeys({ keys, type, base_url: baseUrl, name = '', acco
   const kind = upstreamType(type);
   const base = apiBase(baseUrl, kind);
   const insert = db.prepare(
-    'INSERT OR IGNORE INTO upstream_keys (name, key, type, base_url, models, account, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+    `INSERT OR IGNORE INTO upstream_keys (name, key, type, base_url, models, account, concurrency, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   );
+  const limit = concurrency === undefined || concurrency === '' ? DEFAULT_CONCURRENCY[kind] : concurrencyValue(concurrency);
   let added = 0;
   list.forEach((key, i) => {
     const label = list.length > 1 && name ? `${shortText(name, '名称')}-${i + 1}` : shortText(name, '名称');
-    added += insert.run(label, key, kind, base, modelList(models), shortText(account, '所属账号'), Date.now()).changes;
+    added += insert.run(label, key, kind, base, modelList(models), shortText(account, '所属账号'), limit, Date.now()).changes;
   });
   return { added, skipped: list.length - added };
 }
@@ -159,6 +158,10 @@ export function updateUpstreamKey(id, patch) {
   if (patch.models !== undefined) {
     sets.push('models = ?');
     args.push(modelList(patch.models));
+  }
+  if (patch.concurrency !== undefined) {
+    sets.push('concurrency = ?');
+    args.push(concurrencyValue(patch.concurrency));
   }
   if (patch.enabled !== undefined) {
     sets.push('enabled = ?');
@@ -222,6 +225,14 @@ function apiBase(value, type = 'openai') {
     throw new HttpError(400, '接口地址必须是 http(s) 开头的网址，填到 /v1 为止，比如 https://example.com/v1');
   }
   return url;
+}
+
+function concurrencyValue(value) {
+  const n = Number(value === '' ? 0 : value);
+  if (!Number.isInteger(n) || n < 0 || n > MAX_CONCURRENCY) {
+    throw new HttpError(400, `并发要填 0～${MAX_CONCURRENCY} 的整数，0 表示不限`);
+  }
+  return n;
 }
 
 function modelList(value) {

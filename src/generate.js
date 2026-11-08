@@ -76,7 +76,10 @@ export async function executeGeneration(job) {
 
   let result;
   try {
-    result = await generateImages(payload);
+    result = await generateImages(payload, {
+      signal: ctx.signal,
+      info: { caller: ctx.key.name, endpoint, model: model.id, prompt: String(payload.prompt).slice(0, 200) },
+    });
   } catch (err) {
     const { logId } = recordCall({
       ...call,
@@ -84,6 +87,7 @@ export async function executeGeneration(job) {
       status: 'error',
       error: err.internal ?? err.message,
       durationMs: Date.now() - startedAt,
+      queueMs: err.queueMs,
     });
     linkAiCall(job.ai?.callId, logId);
     throw err;
@@ -97,6 +101,7 @@ export async function executeGeneration(job) {
     status: 'success',
     images: items.length,
     durationMs: Date.now() - startedAt,
+    queueMs: result.queueMs,
   });
   linkAiCall(job.ai?.callId, logId);
   return {
