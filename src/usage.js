@@ -39,7 +39,7 @@ export function estimatePoints(model, images, size, usedToday) {
  */
 export function recordCall({
   key, endpoint, model, prompt, finalPrompt = null, size, n, images = 0, status, error = null, durationMs, ip,
-  upstreamKeyId = null, account = null, queueMs = 0,
+  upstreamKeyId = null, account = null, queueMs = 0, adjusted = null, anlas = null,
 }) {
   const now = Date.now();
   const day = beijingDay(now);
@@ -56,12 +56,14 @@ export function recordCall({
     const { lastInsertRowid } = db
       .prepare(`
         INSERT INTO logs (created_at, day, key_id, key_name, endpoint, model, upstream_model, family, prompt, final_prompt,
-                          size, n, images, points, status, error, duration_ms, ip, upstream_key_id, account, queue_ms)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+                          size, n, images, points, status, error, duration_ms, ip, upstream_key_id, account, queue_ms,
+                          adjusted, anlas)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
       .run(
         now, day, key.id, key.name, endpoint, model.id, model.upstream, family, String(prompt).slice(0, 2000),
         finalPrompt && finalPrompt !== prompt ? String(finalPrompt).slice(0, 2000) : null,
         size, n, images, points, status, error, durationMs, ip, upstreamKeyId, account, Math.round(queueMs ?? 0),
+        adjusted, anlas,
       );
     db.prepare('UPDATE api_keys SET used_images = used_images + ?, used_points = used_points + ?, last_used_at = ? WHERE id = ?')
       .run(images, points, now, key.id);
@@ -73,7 +75,8 @@ const aggregate = (t = '') => `
   COUNT(*) AS calls,
   COALESCE(SUM(${t}status = 'success'), 0) AS success,
   COALESCE(SUM(${t}images), 0) AS images,
-  COALESCE(SUM(${t}points), 0) AS points`;
+  COALESCE(SUM(${t}points), 0) AS points,
+  COALESCE(SUM(${t}anlas), 0) AS anlas`;
 
 /** 某天（不传就是全部）的 AI 提示词优化用量和成本 */
 export function aiSummary(day) {
@@ -97,7 +100,7 @@ function dailyStats() {
   for (const row of db
     .prepare('SELECT day, COUNT(*) AS ai_calls, COALESCE(SUM(cost), 0) AS ai_cost FROM ai_calls WHERE day >= ? GROUP BY day')
     .all(since)) {
-    days.set(row.day, { calls: 0, success: 0, images: 0, points: 0, ...days.get(row.day), ...row });
+    days.set(row.day, { calls: 0, success: 0, images: 0, points: 0, anlas: 0, ...days.get(row.day), ...row });
   }
   return [...days.values()].sort((a, b) => b.day.localeCompare(a.day));
 }
@@ -121,7 +124,7 @@ function keyStats(today) {
     .all()) {
     const row = byId.get(ai.key_id);
     if (row) Object.assign(row, { ai_calls: ai.ai_calls, ai_cost: ai.ai_cost });
-    else rows.push({ ...ai, calls: 0, success: 0, images: 0, points: 0, today_images: 0, today_points: 0 });
+    else rows.push({ ...ai, calls: 0, success: 0, images: 0, points: 0, anlas: 0, today_images: 0, today_points: 0 });
   }
   return rows.sort((a, b) => b.points - a.points || b.ai_cost - a.ai_cost);
 }
@@ -179,7 +182,7 @@ export function listLogs({ page = 1, pageSize = 20, keyId, status } = {}) {
   const items = db
     .prepare(`SELECT l.id, l.created_at, l.key_id, COALESCE(k.name, l.key_name) AS key_name, l.endpoint, l.model,
                      l.upstream_model, l.prompt, l.final_prompt, l.size, l.n, l.images, l.points, l.status, l.error,
-                     l.duration_ms, l.queue_ms, l.ip,
+                     l.duration_ms, l.queue_ms, l.adjusted, l.anlas, l.ip,
                      COALESCE(NULLIF(u.name, ''), '#' || l.upstream_key_id) AS upstream_key_name,
                      a.model AS ai_model, a.input_tokens AS ai_input_tokens, a.output_tokens AS ai_output_tokens,
                      a.cost AS ai_cost

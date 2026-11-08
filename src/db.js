@@ -120,6 +120,10 @@ if (!logColumns.has('account')) db.exec('ALTER TABLE logs ADD COLUMN account TEX
 if (!logColumns.has('final_prompt')) db.exec('ALTER TABLE logs ADD COLUMN final_prompt TEXT');
 // 上游秘钥都满了时在中继里排队等了多久（毫秒），算在 duration_ms 里
 if (!logColumns.has('queue_ms')) db.exec('ALTER TABLE logs ADD COLUMN queue_ms INTEGER NOT NULL DEFAULT 0');
+// 按上游秘钥的出图上限改了什么，比如“尺寸 1536x1024 → 1216x832，步数 40 → 28”；没改为空
+if (!logColumns.has('adjusted')) db.exec('ALTER TABLE logs ADD COLUMN adjusted TEXT');
+// 官方秘钥出的图按官网计价估算花了多少 Anlas（Opus 免费的记 0）；OpenAI 兼容的上游为空
+if (!logColumns.has('anlas')) db.exec('ALTER TABLE logs ADD COLUMN anlas INTEGER');
 
 // 调用密钥能不能用 AI 提示词优化：0 = 不能（写 --ai 也不行），1 = 按后台的 AI 设置走
 const keyColumns = new Set(db.prepare('PRAGMA table_info(api_keys)').all().map((c) => c.name));
@@ -137,6 +141,24 @@ if (!upstreamColumns.has('concurrency')) {
   db.exec('ALTER TABLE upstream_keys ADD COLUMN concurrency INTEGER NOT NULL DEFAULT 0');
   db.exec("UPDATE upstream_keys SET concurrency = 1 WHERE type = 'novelai'");
 }
+// 优先级：数字大的先用，同优先级的轮询；高优先级的满了、失败了、在冷却才轮到低的
+if (!upstreamColumns.has('priority')) db.exec('ALTER TABLE upstream_keys ADD COLUMN priority INTEGER NOT NULL DEFAULT 0');
+// 出图上限（见 limits.js）：最大面积（宽×高的像素数）、最多步数、单次最多几张，0 = 不限，超出的压到上限。
+// 官方秘钥默认 Opus 免费档（1024×1024、28 步、1 张），不花 Anlas
+if (!upstreamColumns.has('max_pixels')) {
+  db.exec('ALTER TABLE upstream_keys ADD COLUMN max_pixels INTEGER NOT NULL DEFAULT 0');
+  db.exec('ALTER TABLE upstream_keys ADD COLUMN max_steps INTEGER NOT NULL DEFAULT 0');
+  db.exec('ALTER TABLE upstream_keys ADD COLUMN max_n INTEGER NOT NULL DEFAULT 0');
+  db.exec("UPDATE upstream_keys SET max_pixels = 1048576, max_steps = 28, max_n = 1 WHERE type = 'novelai'");
+}
+// 只出免费图（官方秘钥）：按账号状态和计价（见 anlas.js）算出这次要花 Anlas 就不接，默认开。
+// nai_account 是最近一次查 /user/subscription 的结果（JSON：套餐、Anlas、Opus 用量条、查询时间、错误）
+// 升级时只给接官方地址的秘钥打开：自建反代不一定转发 /user/subscription，打开了查不到账号会一张都不出
+if (!upstreamColumns.has('free_only')) {
+  db.exec('ALTER TABLE upstream_keys ADD COLUMN free_only INTEGER NOT NULL DEFAULT 0');
+  db.exec("UPDATE upstream_keys SET free_only = 1 WHERE type = 'novelai' AND base_url = 'https://image.novelai.net'");
+}
+if (!upstreamColumns.has('nai_account')) db.exec('ALTER TABLE upstream_keys ADD COLUMN nai_account TEXT');
 
 // 有的上游直接返回 b64_json 不给链接：图片存到数据目录，file 是文件名，mime 是类型
 const imageColumns = new Set(db.prepare('PRAGMA table_info(images)').all().map((c) => c.name));

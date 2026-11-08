@@ -23,10 +23,11 @@ export async function handleNaiGenerate(req, res) {
     const key = authenticate(req);
     const body = await readNaiBody(req);
     const job = prepareNai({ key, baseUrl: requestBaseUrl(req), ip: clientIp(req), signal: closeSignal(res) }, body);
-    const { images } = await executeGeneration(job);
+    const { images, seed: sent } = await executeGeneration(job);
     const files = await Promise.all(images.map(imageBase64));
     if (acceptsOnlyJson(req.headers.accept)) {
-      const seed = job.payload.seed;
+      // 实际发给上游的种子（官方上游种子不合法时会换成随机的）
+      const seed = Number.isInteger(sent) ? sent : job.payload.seed;
       return sendJson(res, 200, { images: files.map((f, i) => ({ image: f.b64, index: i, seed: seed + i })) });
     }
     const zip = writeZip(files.map((f, i) => ({ name: `image_${i}.${MIME_EXT[f.mime] ?? 'png'}`, data: Buffer.from(f.b64, 'base64') })));

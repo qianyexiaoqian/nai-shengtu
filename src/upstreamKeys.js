@@ -1,5 +1,6 @@
 import { db } from './db.js';
 import { HttpError } from './http.js';
+import { LIMIT_FIELDS, NO_LIMITS, OPUS_FREE, limitValue } from './limits.js';
 import { NOVELAI_BASE } from './novelai.js';
 import { getSettings, saveSettings } from './settings.js';
 import { beijingDay } from './usage.js';
@@ -13,8 +14,19 @@ export const UPSTREAM_TYPES = ['openai', 'novelai'];
 // 每把秘钥同时最多几个请求，0 = 不限。NovelAI 官方同一个账号同时只能生成一张（并发会被 429 拒绝），默认 1
 const DEFAULT_CONCURRENCY = { openai: 0, novelai: 1 };
 const MAX_CONCURRENCY = 100;
+// 出图上限的默认值（见 limits.js）：官方秘钥默认 Opus 免费档，不花 Anlas；OpenAI 兼容的不限
+const DEFAULT_LIMITS = { openai: NO_LIMITS, novelai: OPUS_FREE };
+const MAX_PRIORITY = 1000;
+// 官方秘钥的账号状态超过这么久没查成功，就当不知道（“只出免费图”的秘钥这时不接请求，免得用量条用完了还在花 Anlas）
+const ACCOUNT_STALE_MS = 30 * 60_000;
 
 export const keyHint = (key) => `${key.slice(0, 6)}…${key.slice(-4)}`;
+
+/** 后台看的账号状态：加上现在算不算数（live）、是不是有效的 Opus（opus） */
+function accountView(row, now) {
+  const account = savedAccount(row);
+  return account && { ...account, live: Boolean(liveAccount(row, now)), opus: account.level >= 3 && Boolean(account.active) };
+}
 
 /** 每日分档按上游账号计数；没填账号的秘钥自成一个账号 */
 export const accountOf = (row) => row.account?.trim() || `#${row.id}`;
@@ -22,6 +34,42 @@ export const accountOf = (row) => row.account?.trim() || `#${row.id}`;
 const supportedModels = (row) => (row.models ? row.models.split(',') : []);
 
 export const isCooling = (id, now = Date.now()) => (cooldowns.get(id) ?? 0) > now;
+
+/** 官方秘钥最近一次查到的账号状态（见 naiAccounts.js）；没查过是 null */
+export function savedAccount(row) {
+  try {
+    return row.nai_account ? JSON.parse(row.nai_account) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 拿来算这次要不要花 Anlas 的账号状态：查成功过、没过期、而且最近一次查询没有失败才算数
+ * （查失败了就不知道用量条现在怎样，宁可不出图）
+ */
+export function liveAccount(row, now = Date.now()) {
+  const account = savedAccount(row);
+  if (!account?.checked_at || now - account.checked_at >= ACCOUNT_STALE_MS) return null;
+  return account.error_at && account.error_at >= account.checked_at ? null : account;
+}
+
+/**
+ * 记下查到的账号状态；失败时保留上次查到的，只记错误。startedAt 是这次查询发出去的时间：
+ * 比已经存下的那次更早发出的结果（慢的响应后到）不覆盖，免得旧的用量条把新的盖掉。
+ */
+export function saveAccount(id, account, error = null, startedAt = Date.now()) {
+  const row = db.prepare('SELECT nai_account FROM upstream_keys WHERE id = ?').get(id);
+  if (!row) return null;
+  const saved = savedAccount(row);
+  if (saved?.attempt_at > startedAt) return saved;
+  const now = Date.now();
+  const next = error
+    ? { ...saved, error: String(error).slice(0, 200), error_at: now, attempt_at: startedAt }
+    : { ...account, checked_at: now, started_at: startedAt, attempt_at: startedAt, error: null, error_at: null };
+  db.prepare('UPDATE upstream_keys SET nai_account = ? WHERE id = ?').run(JSON.stringify(next), id);
+  return next;
+}
 
 /** 能接这个上游模型的已启用秘钥（没限定模型的秘钥什么都接），按 id 排 */
 export function candidateKeys(model) {
@@ -44,9 +92,20 @@ export function rotate(keys, start) {
  * （其它秘钥都失败时仍会再试，避免全部冷却时直接不可用）。实际取秘钥时还要看并发，见 queue.js。
  */
 export function upstreamKeyOrder(model) {
-  const rotated = rotate(candidateKeys(model), nextRotation());
+  const start = nextRotation();
+  const rotated = byPriority(candidateKeys(model)).flatMap((group) => rotate(group, start));
   const now = Date.now();
   return [...rotated.filter((k) => !isCooling(k.id, now)), ...rotated.filter((k) => isCooling(k.id, now))];
+}
+
+/** 按优先级分组，数字大的组在前；组内保持原来的顺序 */
+export function byPriority(keys) {
+  const groups = new Map();
+  for (const key of keys) {
+    const rank = key.priority ?? 0;
+    groups.set(rank, [...(groups.get(rank) ?? []), key]);
+  }
+  return [...groups].sort(([a], [b]) => b - a).map(([, group]) => group);
 }
 
 /** 已启用秘钥的接口地址（按类型 + 地址去重），每个地址带一把秘钥，用来查模型列表 */
@@ -97,25 +156,37 @@ export function listUpstreamKeys() {
   const now = Date.now();
   return db
     .prepare(`
-      SELECT u.id, u.name, u.key, u.type, u.base_url, u.models, u.account, u.concurrency, u.enabled, u.created_at, u.last_used_at,
+      SELECT u.id, u.name, u.key, u.type, u.base_url, u.models, u.account, u.concurrency, u.priority,
+             u.max_pixels, u.max_steps, u.max_n, u.free_only, u.nai_account, u.enabled, u.created_at, u.last_used_at,
              u.last_error, u.last_error_at,
              COUNT(l.id) AS calls,
              COALESCE(SUM(l.status = 'success'), 0) AS success,
              COALESCE(SUM(l.images), 0) AS images,
              COALESCE(SUM(l.points), 0) AS points,
              COALESCE(SUM(CASE WHEN l.day = ? THEN l.images END), 0) AS today_images,
-             COALESCE(SUM(CASE WHEN l.day = ? THEN l.points END), 0) AS today_points
+             COALESCE(SUM(CASE WHEN l.day = ? THEN l.points END), 0) AS today_points,
+             COALESCE(SUM(l.anlas), 0) AS anlas,
+             COALESCE(SUM(CASE WHEN l.day = ? THEN l.anlas END), 0) AS today_anlas
       FROM upstream_keys u LEFT JOIN logs l ON l.upstream_key_id = u.id
-      GROUP BY u.id ORDER BY u.id`)
-    .all(today, today)
-    .map(({ key, ...row }) => {
+      GROUP BY u.id ORDER BY u.priority DESC, u.id`)
+    .all(today, today, today)
+    .map(({ key, nai_account: _account, ...row }) => {
       const coolingUntil = cooldowns.get(row.id) ?? 0;
-      return { ...row, key_hint: keyHint(key), cooling_until: coolingUntil > now ? coolingUntil : null };
+      return {
+        ...row,
+        key_hint: keyHint(key),
+        cooling_until: coolingUntil > now ? coolingUntil : null,
+        nai_account: row.type === 'novelai' ? accountView({ nai_account: _account }, now) : null,
+      };
     });
 }
 
-/** keys 可以一次贴多把（换行或逗号分隔），都用同一个类型和接口地址；已存在的跳过 */
-export function addUpstreamKeys({ keys, type, base_url: baseUrl, name = '', account = '', models = '', concurrency } = {}) {
+/**
+ * keys 可以一次贴多把（换行或逗号分隔），都用同一个类型、接口地址和设置；已存在的跳过。
+ * 并发、出图上限没填的按类型取默认值，优先级默认 0。
+ */
+export function addUpstreamKeys(fields = {}) {
+  const { keys, type, base_url: baseUrl, name = '', account = '', models = '', concurrency, priority, free_only: freeOnly } = fields;
   const list = String(keys ?? '').split(/[\s,，]+/).filter(Boolean);
   if (!list.length) throw new HttpError(400, '请填写上游秘钥');
   for (const key of list) {
@@ -124,25 +195,45 @@ export function addUpstreamKeys({ keys, type, base_url: baseUrl, name = '', acco
   const kind = upstreamType(type);
   const base = apiBase(baseUrl, kind);
   const insert = db.prepare(
-    `INSERT OR IGNORE INTO upstream_keys (name, key, type, base_url, models, account, concurrency, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT OR IGNORE INTO upstream_keys
+       (name, key, type, base_url, models, account, concurrency, priority, max_pixels, max_steps, max_n, free_only, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   );
-  const limit = concurrency === undefined || concurrency === '' ? DEFAULT_CONCURRENCY[kind] : concurrencyValue(concurrency);
-  let added = 0;
+  const blank = (value) => value === undefined || value === null || value === '';
+  const limit = blank(concurrency) ? DEFAULT_CONCURRENCY[kind] : concurrencyValue(concurrency);
+  const rank = blank(priority) ? 0 : priorityValue(priority);
+  const limits = LIMIT_FIELDS.map((f) => (blank(fields[f]) ? DEFAULT_LIMITS[kind][f] : limitOf(f, fields[f])));
+  // 只出免费图只对官方秘钥有意义，官方默认开
+  const free = kind === 'novelai' && (blank(freeOnly) ? true : flag(freeOnly)) ? 1 : 0;
+  const ids = [];
   list.forEach((key, i) => {
     const label = list.length > 1 && name ? `${shortText(name, '名称')}-${i + 1}` : shortText(name, '名称');
-    added += insert.run(label, key, kind, base, modelList(models), shortText(account, '所属账号'), limit, Date.now()).changes;
+    const { changes, lastInsertRowid } = insert.run(
+      label, key, kind, base, modelList(models), shortText(account, '所属账号'), limit, rank, ...limits, free, Date.now(),
+    );
+    if (changes) ids.push(Number(lastInsertRowid));
   });
-  return { added, skipped: list.length - added };
+  return { added: ids.length, skipped: list.length - ids.length, ids, type: kind };
 }
 
-export function updateUpstreamKey(id, patch) {
-  const row = db.prepare('SELECT type FROM upstream_keys WHERE id = ?').get(id);
+export function updateUpstreamKey(id, input) {
+  const row = db.prepare('SELECT type, concurrency FROM upstream_keys WHERE id = ?').get(id);
   if (!row) throw new HttpError(404, '上游秘钥不存在');
-  const kind = patch.type === undefined ? row.type : upstreamType(patch.type);
+  const kind = input.type === undefined ? row.type : upstreamType(input.type);
+  const patch = { ...input };
+  if (kind !== row.type) {
+    // 换了类型：没一起改的并发、出图上限、只出免费图按新类型的默认值来，免得官方秘钥带着“不限”
+    // （列表的“保存”会把没动过的并发原样带上，和原来一样就当没改）
+    if (patch.concurrency === undefined || Number(patch.concurrency) === row.concurrency) {
+      patch.concurrency = DEFAULT_CONCURRENCY[kind];
+    }
+    for (const field of LIMIT_FIELDS) patch[field] ??= DEFAULT_LIMITS[kind][field];
+    patch.free_only ??= kind === 'novelai';
+  }
+  if (kind !== 'novelai' && patch.free_only !== undefined) patch.free_only = false; // 只有官方秘钥有这个
   const sets = [];
   const args = [];
-  if (patch.type !== undefined) {
+  if (input.type !== undefined) {
     sets.push('type = ?');
     args.push(kind);
   }
@@ -163,6 +254,19 @@ export function updateUpstreamKey(id, patch) {
     sets.push('concurrency = ?');
     args.push(concurrencyValue(patch.concurrency));
   }
+  if (patch.priority !== undefined) {
+    sets.push('priority = ?');
+    args.push(priorityValue(patch.priority));
+  }
+  for (const field of LIMIT_FIELDS) {
+    if (patch[field] === undefined) continue;
+    sets.push(`${field} = ?`);
+    args.push(limitOf(field, patch[field]));
+  }
+  if (patch.free_only !== undefined) {
+    sets.push('free_only = ?');
+    args.push(flag(patch.free_only) ? 1 : 0);
+  }
   if (patch.enabled !== undefined) {
     sets.push('enabled = ?');
     args.push(patch.enabled ? 1 : 0);
@@ -171,6 +275,12 @@ export function updateUpstreamKey(id, patch) {
   db.prepare(`UPDATE upstream_keys SET ${sets.join(', ')} WHERE id = ?`).run(...args, id);
   cooldowns.delete(id); // 改了配置、启用 / 停用都清掉冷却，下次请求立即参与轮询
   return { ok: true };
+}
+
+export function getUpstreamKey(id) {
+  const row = db.prepare('SELECT * FROM upstream_keys WHERE id = ?').get(id);
+  if (!row) throw new HttpError(404, '上游秘钥不存在');
+  return row;
 }
 
 export function deleteUpstreamKey(id) {
@@ -225,6 +335,24 @@ function apiBase(value, type = 'openai') {
     throw new HttpError(400, '接口地址必须是 http(s) 开头的网址，填到 /v1 为止，比如 https://example.com/v1');
   }
   return url;
+}
+
+const flag = (value) => [true, 1, '1', 'true', 'on'].includes(value);
+
+function priorityValue(value) {
+  const n = Number(value === '' ? 0 : value);
+  if (!Number.isInteger(n) || Math.abs(n) > MAX_PRIORITY) {
+    throw new HttpError(400, `优先级要填 -${MAX_PRIORITY}～${MAX_PRIORITY} 的整数，数字大的先用`);
+  }
+  return n;
+}
+
+function limitOf(field, value) {
+  try {
+    return limitValue(field, value);
+  } catch (err) {
+    throw new HttpError(400, err.message);
+  }
 }
 
 function concurrencyValue(value) {

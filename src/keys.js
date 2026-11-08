@@ -62,9 +62,33 @@ export function authenticate(req) {
   return row;
 }
 
-export function assertQuota(row, images) {
-  if (row.quota_images > 0 && row.used_images + images > row.quota_images) {
-    throw new HttpError(429, `额度不足：已用 ${row.used_images} / ${row.quota_images} 张`, {
+const pending = new Map(); // 调用密钥 id → 已经占住、还没记账的张数（正在出图或排队中）
+
+/**
+ * 出图前占住额度：按库里最新的已用张数加上正在出图、排队中的算，超了就拒绝。
+ * 返回放开的函数，出完、记完账后调用（成功失败都要调）。
+ */
+export function reserveQuota(row, images) {
+  if (row.quota_images > 0) {
+    const used = db.prepare('SELECT used_images FROM api_keys WHERE id = ?').get(row.id)?.used_images ?? row.used_images;
+    assertQuota({ ...row, used_images: used }, images, pending.get(row.id) ?? 0);
+  }
+  pending.set(row.id, (pending.get(row.id) ?? 0) + images);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    const left = (pending.get(row.id) ?? images) - images;
+    if (left > 0) pending.set(row.id, left);
+    else pending.delete(row.id);
+  };
+}
+
+/** pending：已经占住、还在出图或排队的张数 */
+export function assertQuota(row, images, pending = 0) {
+  if (row.quota_images > 0 && row.used_images + pending + images > row.quota_images) {
+    const inFlight = pending ? `、进行中 ${pending}` : '';
+    throw new HttpError(429, `额度不足：已用 ${row.used_images}${inFlight} / ${row.quota_images} 张`, {
       type: 'insufficient_quota',
       code: 'insufficient_quota',
     });

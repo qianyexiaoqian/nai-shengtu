@@ -6,10 +6,13 @@ import { createKey, deleteKey, listKeys, updateKey } from './keys.js';
 import {
   addModels, deleteModel, listModelRows, pullUpstreamModels, resolveModel, updateModel, upstreamModelOptions,
 } from './models.js';
-import { queueSnapshot } from './queue.js';
 import { convertText } from './tags.js';
 import { getSettings, saveSettings } from './settings.js';
-import { addUpstreamKeys, deleteUpstreamKey, listUpstreamKeys, updateUpstreamKey } from './upstreamKeys.js';
+import { refreshAccount } from './naiAccounts.js';
+import { dispatch, queueSnapshot } from './queue.js';
+import {
+  addUpstreamKeys, deleteUpstreamKey, getUpstreamKey, listUpstreamKeys, liveAccount, updateUpstreamKey,
+} from './upstreamKeys.js';
 import { aiSummary, beijingDay, getStats, listLogs } from './usage.js';
 
 const SESSION_MS = 7 * 86_400_000;
@@ -41,9 +44,34 @@ const ROUTES = [
   ['DELETE', /^\/keys\/(\d+)$/, ({ params }) => deleteKey(Number(params[0]))],
   ['GET', /^\/queue$/, () => queueSnapshot()],
   ['GET', /^\/upstream-keys$/, () => listUpstreamKeys()],
-  ['POST', /^\/upstream-keys$/, ({ body }) => addUpstreamKeys(body)],
+  ['POST', /^\/upstream-keys$/, async ({ body }) => {
+    const result = addUpstreamKeys(body);
+    // 新加的官方秘钥马上查一下账号（“只出免费图”要用），最多等 8 秒，没查完的后台接着查
+    if (result.type === 'novelai' && result.ids.length) {
+      await waitAtMost(Promise.all(result.ids.map((id) => refreshAccount(getUpstreamKey(id)))), 8_000);
+    }
+    dispatch();
+    return result;
+  }],
   ['POST', /^\/upstream-keys\/models$/, ({ body }) => pullUpstreamModels(body)],
-  ['PATCH', /^\/upstream-keys\/(\d+)$/, ({ params, body }) => updateUpstreamKey(Number(params[0]), body)],
+  ['POST', /^\/upstream-keys\/(\d+)\/account$/, async ({ params }) => {
+    const row = getUpstreamKey(Number(params[0]));
+    if (row.type !== 'novelai') throw new HttpError(400, '只有 NovelAI 官方秘钥能查账号');
+    const account = await refreshAccount(row);
+    if (account?.error) throw new HttpError(502, `查账号失败：${account.error}`, { type: 'server_error' });
+    return account;
+  }],
+  ['PATCH', /^\/upstream-keys\/(\d+)$/, async ({ params, body }) => {
+    const result = updateUpstreamKey(Number(params[0]), body);
+    // 启用、换了类型或接口地址、或者账号状态已经不算数的官方秘钥，重新查账号（最多等 8 秒）
+    const row = getUpstreamKey(Number(params[0]));
+    const changed = body.type !== undefined || body.base_url !== undefined || body.enabled !== undefined;
+    if (row.type === 'novelai' && row.enabled && (changed || !liveAccount(row))) {
+      await waitAtMost(refreshAccount(row), 8_000);
+    }
+    dispatch(); // 改了并发、优先级、上限或启用，排队的请求可能能发了
+    return result;
+  }],
   ['DELETE', /^\/upstream-keys\/(\d+)$/, ({ params }) => deleteUpstreamKey(Number(params[0]))],
   ['GET', /^\/models$/, () => ({ models: listModelRows(), default_model: getSettings().defaultModel })],
   ['GET', /^\/models\/upstream$/, () => upstreamModelOptions()],
@@ -277,6 +305,9 @@ function httpUrl(value, label, allowEmpty) {
   if (!parsed || !/^https?:$/.test(parsed.protocol)) throw new HttpError(400, `${label}必须是 http(s) 开头的网址`);
   return url;
 }
+
+const waitAtMost = (promise, ms) =>
+  Promise.race([promise.catch(() => {}), new Promise((resolve) => setTimeout(resolve, ms).unref())]);
 
 function positiveInt(value, fallback) {
   const n = Number(value);

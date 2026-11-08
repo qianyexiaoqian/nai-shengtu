@@ -85,6 +85,8 @@
            border: 1px solid var(--border); border-radius: 12px; }
   dialog::backdrop { background: rgb(0 0 0 / .4); }
   #models-dialog { max-width: 640px; }
+  #limits-dialog { max-width: 600px; }
+  #limits-dialog .form-grid { grid-template-columns: 110px minmax(0, 1fr); margin-bottom: 8px; }
   #models-dialog .checks { max-height: 50vh; overflow-y: auto; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); }
   .keybox { margin: 12px 0; padding: 10px 12px; font-family: ui-monospace, Consolas, monospace; word-break: break-all;
             background: var(--bg); border: 1px dashed var(--border); border-radius: 8px; }
@@ -201,8 +203,18 @@
           <input id="upstream-key-account" class="md" placeholder="所属账号（可选）">
           <input id="upstream-key-models" class="url" placeholder="支持的模型（可选，逗号分隔）">
           <input id="upstream-key-concurrency" class="sm" type="number" min="0" max="100" step="1" placeholder="并发" title="这把秘钥同时最多出几张图，0 = 不限；留空：NovelAI 官方 1，OpenAI 兼容不限">
+          <input id="upstream-key-priority" class="sm" type="number" min="-1000" max="1000" step="1" placeholder="优先级" title="数字大的先用，默认 0；同优先级的轮流用">
           <button type="button" id="upstream-key-pull" title="用上面填的接口地址和第一把秘钥查这个上游有哪些模型">拉取模型</button>
           <button class="primary" type="submit">添加</button>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <span class="muted">出图上限</span>
+          <input id="upstream-key-max_pixels" class="md" placeholder="最大面积，留空 = 不限" title="宽×高的像素数，也可以写 1024x1024；超过的等比缩小">
+          <input id="upstream-key-max_steps" class="sm" type="number" min="0" max="50" step="1" placeholder="最多步数">
+          <input id="upstream-key-max_n" class="sm" type="number" min="0" max="4" step="1" placeholder="每次张数" title="一次请求最多出几张">
+          <button type="button" class="link" data-limits-preset="free" title="1024x1024、28 步、一次 1 张：Opus 订阅不花 Anlas">Opus 免费档</button>
+          <button type="button" class="link" data-limits-preset="none">不限</button>
+          <label class="row" id="upstream-key-free-wrap" hidden><input type="checkbox" id="upstream-key-free_only" checked> 只出免费图</label>
         </div>
       </form>
       <p class="hint">
@@ -219,6 +231,20 @@
       <p class="hint">
         “并发”是这把秘钥同时最多出几张图，留空时 NovelAI 官方是 1、OpenAI 兼容不限（0）。能接这个模型的秘钥都满了时，
         请求排队等（见“排队”页），不会直接失败。
+      </p>
+      <p class="hint">
+        “优先级”数字大的先用，同优先级的轮流用；高优先级的秘钥都在忙、冷却中或失败了，才会用低优先级的。默认 0，可以填负数。
+      </p>
+      <p class="hint">
+        “出图上限”防止有人出大图、加步数、一次多张把 Anlas 花掉：面积按宽×高算，超过的等比缩小（比如 1536x1024 → 1216x832），
+        步数、张数超过的取上限，照常出图，聊天回复和调用日志里会写改了什么。NovelAI 官方秘钥留空时默认“Opus 免费档”
+        （1024x1024、28 步、一次 1 张），OpenAI 兼容的留空不限。
+      </p>
+      <p class="hint">
+        “只出免费图”（NovelAI 官方，默认开）：中继每 5 分钟、以及每次出图后查一下账号的套餐、Anlas 和 Opus 用量条，
+        按官网的计价算这次要不要花 Anlas，要花就不发给这把秘钥（换别的秘钥，都不行就返回“免费额度暂时用完了”）。
+        比如 NAI5 的免费额度（Opus 用量条）用完后，NAI5 每张都要收 Anlas，这时 NAI5 的请求就不会发给它；NAI4.5 及以前的照常免费出。
+        账号不是 Opus、或者账号状态查不到时，开着这个的秘钥不接任何请求。
       </p>
       <p class="hint">
         支持某个模型的秘钥按顺序轮询。某把秘钥被上游拒绝（401 失效、402 点数不足、403 不允许该模型、429 限流）时，自动换下一把重试，
@@ -491,6 +517,34 @@
   </div>
 </dialog>
 
+<dialog id="limits-dialog">
+  <h2>出图上限</h2>
+  <p class="muted" id="limits-dialog-title" style="word-break:break-all"></p>
+  <form id="limits-form" autocomplete="off">
+    <div class="form-grid">
+      <label for="limits-max_pixels">最大面积</label>
+      <input id="limits-max_pixels" name="max_pixels" class="md" placeholder="0 = 不限" required>
+      <p class="hint">宽×高的像素数，也可以写 1024x1024。超过的等比缩小，比如 1536x1024 → 1216x832。</p>
+      <label for="limits-max_steps">最多步数</label>
+      <input id="limits-max_steps" name="max_steps" class="sm" type="number" min="0" max="50" step="1" required>
+      <label for="limits-max_n">每次最多</label>
+      <div class="row"><input id="limits-max_n" name="max_n" class="sm" type="number" min="0" max="4" step="1" required> 张</div>
+      <label for="limits-free_only">只出免费图</label>
+      <label class="row"><input id="limits-free_only" name="free_only" type="checkbox"> 要花 Anlas 的请求不发给这把秘钥</label>
+      <p class="hint" id="limits-free-hint"></p>
+    </div>
+    <p class="hint">0 表示不限。Opus 订阅出图不花 Anlas 的范围：不超过 1024×1024、28 步以内、一次 1 张。</p>
+    <p class="err-text" id="limits-dialog-error"></p>
+    <div class="row" style="margin-top:12px">
+      <button type="button" class="link" data-limits-preset="free">Opus 免费档</button>
+      <button type="button" class="link" data-limits-preset="none">不限</button>
+      <span class="spacer"></span>
+      <button type="button" id="limits-dialog-cancel">取消</button>
+      <button type="submit" class="primary">保存</button>
+    </div>
+  </form>
+</dialog>
+
 <dialog id="models-dialog">
   <h2>支持的模型</h2>
   <p class="muted" id="models-dialog-title" style="word-break:break-all"></p>
@@ -651,12 +705,12 @@ loaders.overview = async () => {
   const cards = [
     ['今日调用', fmtNum(today.calls), `成功 ${fmtNum(today.success)} · 失败 ${fmtNum(today.calls - today.success)}`],
     ['今日出图', `${fmtNum(today.images)} 张`, ''],
-    ['今日上游扣点（估）', fmtPoints(today.points), fmtMoney(today.points)],
+    ['今日上游扣点（估）', fmtPoints(today.points), [fmtMoney(today.points), today.anlas ? `Anlas ${fmtNum(today.anlas)}` : ''].filter(Boolean).join(' · ')],
     ['今日 AI 优化成本', fmtCost(ai.today.cost), aiSub(ai.today)],
     ['今日总成本（估）', fmtCost(naiYuan(today.points) + ai.today.cost), totalSub(today.points, ai.today)],
     ['累计调用', fmtNum(total.calls), `成功 ${fmtNum(total.success)} · 失败 ${fmtNum(total.calls - total.success)}`],
     ['累计出图', `${fmtNum(total.images)} 张`, ''],
-    ['累计上游扣点（估）', fmtPoints(total.points), fmtMoney(total.points)],
+    ['累计上游扣点（估）', fmtPoints(total.points), [fmtMoney(total.points), total.anlas ? `Anlas ${fmtNum(total.anlas)}` : ''].filter(Boolean).join(' · ')],
     ['累计 AI 优化成本', fmtCost(ai.total.cost), aiSub(ai.total)],
     ['累计总成本（估）', fmtCost(naiYuan(total.points) + ai.total.cost), totalSub(total.points, ai.total)],
   ];
@@ -691,7 +745,9 @@ loaders.overview = async () => {
   renderTable($('#overview-upstream'),
     [['上游秘钥'], ['调用', 'num'], ['成功', 'num'], ['出图', 'num'], ['扣点（估）', 'num'], ['今日出图', 'num'], ['今日扣点', 'num']],
     stats.byUpstreamKey.map((u) => [`${esc(u.name)}${u.deleted ? ' <span class="badge">已删除</span>' : ''}`,
-      fmtNum(u.calls), fmtNum(u.success), fmtNum(u.images), fmtPointsMoney(u.points), fmtNum(u.today_images), fmtNum(u.today_points)]));
+      fmtNum(u.calls), fmtNum(u.success), fmtNum(u.images),
+      fmtPointsMoney(u.points) + (u.anlas ? `<br><span class="muted">Anlas ${fmtNum(u.anlas)}</span>` : ''),
+      fmtNum(u.today_images), fmtNum(u.today_points)]));
 };
 
 // ---------- 调用日志 ----------
@@ -725,10 +781,10 @@ async function loadLogsPage() {
       l.upstream_key_name ? esc(l.upstream_key_name) : '<span class="muted">—</span>',
       ENDPOINTS[l.endpoint] ?? esc(l.endpoint),
       `${esc(l.model)}${l.upstream_model && l.upstream_model !== l.model ? `<br><span class="muted">→ ${esc(l.upstream_model)}</span>` : ''}`,
-      esc(l.size),
+      esc(l.size) + (l.adjusted ? `<br><span class="muted" title="${esc(l.adjusted)}">${esc(l.adjusted)}</span>` : ''),
       `${fmtNum(l.images)} / ${fmtNum(l.n)}`,
       l.status === 'success' ? '<span class="badge ok">成功</span>' : '<span class="badge err">失败</span>',
-      fmtNum(l.points),
+      fmtNum(l.points) + (l.anlas == null ? '' : `<br><span class="muted">${l.anlas ? `Anlas ${fmtNum(l.anlas)}` : 'Anlas 免费'}</span>`),
       `${(Number(l.duration_ms || 0) / 1000).toFixed(1)}s` +
         (l.queue_ms >= 1000 ? `<br><span class="muted">排队 ${(l.queue_ms / 1000).toFixed(0)}s</span>` : ''),
       `<span title="${esc(l.prompt)}">${esc(String(l.prompt ?? '').slice(0, 80))}</span>` +
@@ -826,16 +882,68 @@ $('#keys-table').addEventListener('change', action(async (event) => {
 const UPSTREAM_TYPES = { openai: 'OpenAI 兼容', novelai: 'NovelAI 官方' };
 
 /** NovelAI 官方令牌拉取模型时顺带查到的套餐和 Anlas */
-const accountText = (account) =>
-  account ? `${account.tier}${account.active ? '' : '（未订阅）'} · Anlas ${fmtNum(account.anlas)}` : '';
+const accountText = (account) => {
+  if (!account) return '';
+  const bar = account.usage_percent == null ? '' : account.usage_negative ? ' · NAI5 免费额度用完了' : ` · NAI5 免费额度 ${fmtNum(account.usage_percent)}%`;
+  return `${account.tier}${account.active ? '' : '（未订阅）'} · Anlas ${fmtNum(account.anlas)}${bar}`;
+};
 
-loaders.upstream = async () => {
+/** 最大面积显示成 1024×1024 这样（正方形且是 64 的倍数时），否则显示像素数 */
+function fmtArea(pixels) {
+  if (!pixels) return '面积不限';
+  const side = Math.sqrt(pixels);
+  return Number.isInteger(side) ? `${side}×${side}` : `${fmtNum(pixels)} 像素`;
+}
+
+function limitsText(k) {
+  if (!k.max_pixels && !k.max_steps && !k.max_n) return '不限';
+  return [fmtArea(k.max_pixels), k.max_steps ? `${k.max_steps} 步` : '步数不限', k.max_n ? `每次 ${k.max_n} 张` : '张数不限'].join(' · ');
+}
+
+/** 官方秘钥的账号状态：套餐、Anlas、NAI5 免费额度（Opus 用量条） */
+function accountHtml(k) {
+  const a = k.nai_account;
+  const refresh = ' <button class="link" data-action="account">刷新</button>';
+  const blocked = k.free_only ? '，只出免费图开着时这把秘钥不接请求' : '';
+  if (!a?.checked_at) {
+    return `<br><span class="err-text">账号状态未知${a?.error ? `：${esc(a.error.slice(0, 40))}` : ''}${blocked}</span>${refresh}`;
+  }
+  const warning = !k.free_only ? ''
+    : !a.live ? `<br><span class="err-text">账号状态过期或最近一次查询失败${blocked}</span>`
+      : !a.opus ? `<br><span class="err-text">不是有效的 Opus 订阅${blocked}</span>`
+        : '';
+  const parts = [`${esc(a.tier)}${a.active ? '' : '（未订阅）'}`, `Anlas ${fmtNum(a.anlas)}`];
+  if (a.usage_percent != null) {
+    parts.push(a.usage_negative ? '<span class="err-text">NAI5 免费额度用完了</span>' : `NAI5 免费额度 ${fmtNum(a.usage_percent)}%`);
+  }
+  const error = a.error ? `<br><span class="err-text" title="${esc(a.error)}">${fmtTime(a.error_at)} 查询失败：${esc(a.error.slice(0, 40))}</span>` : '';
+  return `<br><span class="muted" title="上次查询 ${fmtTime(a.checked_at)}">${parts.join(' · ')}</span>${refresh}${warning}${error}`;
+}
+
+/** 列表里各行改了还没保存的输入（和上次载入的值不一样的），重画前记下来，fresh 这一行不留 */
+function unsavedUpstreamEdits(fresh) {
+  const edits = new Map();
+  for (const row of document.querySelectorAll('#upstream-keys-table tbody tr[data-id]')) {
+    const before = state.upstreamKeys?.find((k) => k.id === Number(row.dataset.id));
+    if (!before || before.id === fresh) continue;
+    for (const input of row.querySelectorAll('[data-field]')) {
+      const field = input.dataset.field;
+      const original = field === 'models' ? before.models.replaceAll(',', ', ') : String(before[field] ?? '');
+      if (input.value !== original) edits.set(`${before.id}:${field}`, input.value);
+    }
+  }
+  return edits;
+}
+
+loaders.upstream = async ({ fresh = null } = {}) => {
+  const edits = unsavedUpstreamEdits(fresh);
   const keys = await api('GET', '/upstream-keys');
+  state.upstreamKeys = keys;
   const now = Date.now();
   $('#upstream-bases').innerHTML = [...new Set(keys.map((k) => k.base_url))].map((b) => `<option value="${esc(b)}">`).join('');
   renderTable($('#upstream-keys-table'),
-    [['名称'], ['秘钥'], ['类型'], ['接口地址'], ['支持的模型'], ['所属账号'], ['并发'], ['启用'], ['状态'], ['调用 / 成功', 'num'], ['出图', 'num'],
-      ['扣点（估）', 'num'], ['今日出图', 'num'], ['今日扣点', 'num'], ['最近使用'], ['操作']],
+    [['名称'], ['秘钥'], ['类型'], ['接口地址'], ['支持的模型'], ['所属账号'], ['优先级'], ['并发'], ['出图上限'], ['启用'], ['状态'],
+      ['调用 / 成功', 'num'], ['出图（今日 / 累计）', 'num'], ['扣点（今日 / 累计）', 'num'], ['最近使用'], ['操作']],
     keys.map((k) => {
       const status = !k.enabled
         ? '<span class="badge">已停用</span>'
@@ -853,30 +961,48 @@ loaders.upstream = async () => {
         `<input class="url" data-field="base_url" value="${esc(k.base_url)}" list="upstream-bases" required>`,
         `<input class="md" data-field="models" value="${esc(k.models.replaceAll(',', ', '))}" placeholder="全部">`,
         `<input class="name" data-field="account" value="${esc(k.account)}" maxlength="50" placeholder="单独计">`,
+        `<input class="sm" type="number" min="-1000" max="1000" step="1" data-field="priority" value="${k.priority}" title="数字大的先用">`,
         `<input class="sm" type="number" min="0" max="100" step="1" data-field="concurrency" value="${k.concurrency}" title="0 = 不限">`,
+        `${limitsText(k)}` +
+          (k.type === 'novelai'
+            ? `<br>${k.free_only ? '<span class="badge ok">只出免费图</span>' : '<span class="badge err">可能花 Anlas</span>'}`
+            : '') +
+          ' <button class="link" data-action="limits">改</button>',
         `<input type="checkbox" data-action="toggle" ${k.enabled ? 'checked' : ''}>`,
-        status + lastError,
+        status + (k.type === 'novelai' ? accountHtml(k) : '') + lastError,
         `${fmtNum(k.calls)} / ${fmtNum(k.success)}`,
-        fmtNum(k.images),
-        fmtPointsMoney(k.points),
-        fmtNum(k.today_images),
-        fmtNum(k.today_points),
+        `${fmtNum(k.today_images)} / ${fmtNum(k.images)}`,
+        `${fmtNum(k.today_points)} / ${fmtPointsMoney(k.points)}` +
+          (k.type === 'novelai' ? `<br><span class="muted">Anlas（估）${fmtNum(k.today_anlas)} / ${fmtNum(k.anlas)}</span>` : ''),
         fmtTime(k.last_used_at),
         `<button class="link" data-action="pull">拉取模型</button><button class="link" data-action="save">保存</button>` +
           `<button class="link danger" data-action="delete">删除</button>`,
       ];
     }),
     '还没有上游秘钥，所有调用都会失败，先在上面添加');
-  [...$('#upstream-keys-table').tBodies[0].rows].forEach((row, i) => { if (keys[i]) row.dataset.id = keys[i].id; });
+  [...$('#upstream-keys-table').tBodies[0].rows].forEach((row, i) => {
+    if (!keys[i]) return;
+    row.dataset.id = keys[i].id;
+    for (const input of row.querySelectorAll('[data-field]')) {
+      const edit = edits.get(`${keys[i].id}:${input.dataset.field}`);
+      if (edit !== undefined) input.value = edit;
+    }
+  });
 };
 
 $('#upstream-key-form').addEventListener('submit', action(async () => {
+  const novelai = $('#upstream-key-type').value === 'novelai';
   const { added, skipped } = await api('POST', '/upstream-keys', {
     keys: $('#upstream-key-input').value,
     type: $('#upstream-key-type').value,
     base_url: $('#upstream-key-base').value,
     models: $('#upstream-key-models').value,
     concurrency: $('#upstream-key-concurrency').value,
+    priority: $('#upstream-key-priority').value,
+    max_pixels: $('#upstream-key-max_pixels').value,
+    max_steps: $('#upstream-key-max_steps').value,
+    max_n: $('#upstream-key-max_n').value,
+    free_only: novelai ? $('#upstream-key-free_only').checked : undefined,
     name: $('#upstream-key-name').value,
     account: $('#upstream-key-account').value,
   });
@@ -886,6 +1012,58 @@ $('#upstream-key-form').addEventListener('submit', action(async () => {
 }));
 
 const splitModels = (text) => String(text).split(/[\s,，]+/).filter(Boolean);
+
+// 出图上限的两个预设：添加表单和对话框里都有按钮
+const LIMIT_PRESETS = { free: { max_pixels: '1024x1024', max_steps: 28, max_n: 1 }, none: { max_pixels: 0, max_steps: 0, max_n: 0 } };
+document.addEventListener('click', (event) => {
+  const button = event.target.closest('[data-limits-preset]');
+  if (!button) return;
+  const prefix = button.closest('#limits-dialog') ? '#limits-' : '#upstream-key-';
+  for (const [field, value] of Object.entries(LIMIT_PRESETS[button.dataset.limitsPreset])) $(`${prefix}${field}`).value = value;
+});
+
+/** 面积存的是像素数；正方形且边长是 64 的倍数时显示成 1024x1024 */
+const areaInput = (pixels) => {
+  const side = Math.sqrt(pixels);
+  return !pixels ? 0 : Number.isInteger(side) && side % 64 === 0 ? `${side}x${side}` : pixels;
+};
+
+/** 弹框改一把秘钥的出图上限和“只出免费图”，save 保存成功才关掉（失败把原因显示在框里）；保存了返回 true，取消返回 false */
+function editLimits(key, save) {
+  const dialog = $('#limits-dialog');
+  const form = $('#limits-form');
+  const novelai = key.type === 'novelai';
+  $('#limits-dialog-title').textContent = `${key.name || '未命名'} · ${key.key_hint} · ${UPSTREAM_TYPES[key.type] ?? key.type}`;
+  form.elements.max_pixels.value = areaInput(key.max_pixels);
+  form.elements.max_steps.value = key.max_steps;
+  form.elements.max_n.value = key.max_n;
+  form.elements.free_only.checked = Boolean(key.free_only);
+  form.elements.free_only.disabled = !novelai;
+  $('#limits-free-hint').textContent = novelai
+    ? '按账号的套餐、Opus 用量条和官网计价算这次要不要花 Anlas；比如 NAI5 免费额度用完时，NAI5 的请求就不发给它。账号不是 Opus 或状态查不到时，这把秘钥不接请求。'
+    : '只有 NovelAI 官方秘钥能用（要查账号的 Anlas 和用量条）。OpenAI 兼容的上游只按上面的上限压，没写步数时用上游自己的默认值。';
+  $('#limits-dialog-error').textContent = '';
+  dialog.showModal();
+  return new Promise((resolve) => {
+    const done = (value) => { dialog.close(); resolve(value); };
+    form.onsubmit = async (event) => {
+      event.preventDefault();
+      try {
+        await save({
+          max_pixels: form.elements.max_pixels.value,
+          max_steps: form.elements.max_steps.value,
+          max_n: form.elements.max_n.value,
+          ...(novelai ? { free_only: form.elements.free_only.checked } : {}),
+        });
+        done(true);
+      } catch (err) {
+        $('#limits-dialog-error').textContent = err.message;
+      }
+    };
+    $('#limits-dialog-cancel').onclick = () => done(false);
+    dialog.oncancel = () => resolve(false); // 按 Esc
+  });
+}
 
 /**
  * 弹框勾选这把秘钥支持的模型。models 是从上游拉到的；selected 是已经填了的，没填时全选。
@@ -922,9 +1100,13 @@ $('#models-dialog-filter').addEventListener('input', (event) => {
 $('#models-dialog-all').addEventListener('click', () => { for (const box of visibleModelBoxes()) box.checked = true; });
 $('#models-dialog-none').addEventListener('click', () => { for (const box of visibleModelBoxes()) box.checked = false; });
 
-// 选 NovelAI 官方时接口地址可以留空，秘钥是 pst- 令牌
+// 选 NovelAI 官方时接口地址可以留空，秘钥是 pst- 令牌；出图上限留空默认 Opus 免费档，可以开“只出免费图”
 $('#upstream-key-type').addEventListener('change', (event) => {
   const novelai = event.target.value === 'novelai';
+  $('#upstream-key-free-wrap').hidden = !novelai;
+  $('#upstream-key-max_pixels').placeholder = novelai ? '最大面积，留空 = 1024x1024' : '最大面积，留空 = 不限';
+  $('#upstream-key-max_steps').placeholder = novelai ? '步数，空 = 28' : '最多步数';
+  $('#upstream-key-max_n').placeholder = novelai ? '张数，空 = 1' : '每次张数';
   const base = $('#upstream-key-base');
   base.required = !novelai;
   base.placeholder = novelai ? '接口地址，留空 = https://image.novelai.net' : '接口地址，如 https://example.com/v1';
@@ -934,12 +1116,13 @@ $('#upstream-key-type').addEventListener('change', (event) => {
 });
 
 $('#upstream-key-pull').addEventListener('click', action(async () => {
-  const { base_url: base, models, account } = await api('POST', '/upstream-keys/models', {
+  const { base_url: base, models, account, account_error: accountError } = await api('POST', '/upstream-keys/models', {
     type: $('#upstream-key-type').value,
     base_url: $('#upstream-key-base').value,
     keys: $('#upstream-key-input').value,
   });
   if (account) toast(accountText(account));
+  if (accountError) toast(`查账号失败：${accountError}`, true);
   const input = $('#upstream-key-models');
   const picked = await pickModels({ title: base, models, selected: splitModels(input.value), confirmText: '确定' });
   if (picked) input.value = picked.join(', ');
@@ -950,8 +1133,10 @@ $('#upstream-keys-table').addEventListener('click', action(async (event) => {
   const row = event.target.closest('tr[data-id]');
   if (!button || !row) return;
   if (button.dataset.action === 'pull') {
-    const { base_url: base, models, account } = await api('POST', '/upstream-keys/models', { id: Number(row.dataset.id) });
+    const { base_url: base, models, account, account_error: accountError } =
+      await api('POST', '/upstream-keys/models', { id: Number(row.dataset.id) });
     if (account) toast(accountText(account));
+    if (accountError) toast(`查账号失败：${accountError}`, true);
     const name = row.querySelector('[data-field="name"]').value;
     const picked = await pickModels({
       title: `${name || '未命名'} · ${base}`,
@@ -967,12 +1152,20 @@ $('#upstream-keys-table').addEventListener('click', action(async (event) => {
     for (const input of row.querySelectorAll('[data-field]')) patch[input.dataset.field] = input.value;
     await api('PATCH', `/upstream-keys/${row.dataset.id}`, patch);
     toast('已保存');
+  } else if (button.dataset.action === 'limits') {
+    const key = state.upstreamKeys.find((k) => k.id === Number(row.dataset.id));
+    if (!await editLimits(key, (patch) => api('PATCH', `/upstream-keys/${row.dataset.id}`, patch))) return;
+    toast('出图上限已保存');
+  } else if (button.dataset.action === 'account') {
+    const account = await api('POST', `/upstream-keys/${row.dataset.id}/account`);
+    toast(accountText(account));
   } else if (button.dataset.action === 'delete') {
     if (!confirm('删除这把上游秘钥？调用记录会保留。')) return;
     await api('DELETE', `/upstream-keys/${row.dataset.id}`);
     toast('已删除');
   }
-  await loaders.upstream();
+  // 重画列表时保留别的行没保存的修改；刚保存的这一行用服务器上的值
+  await loaders.upstream({ fresh: button.dataset.action === 'save' ? Number(row.dataset.id) : null });
 }));
 $('#upstream-keys-table').addEventListener('change', action(async (event) => {
   if (event.target.dataset.action !== 'toggle') return;
@@ -1036,26 +1229,36 @@ function renderQueue({ now, keys, running, waiting }) {
     `<div class="card"><div class="label">${label}</div><div class="value">${value}</div><div class="sub">${esc(sub)}</div></div>`).join('');
 
   renderTable($('#queue-keys'),
-    [['上游秘钥'], ['类型'], ['正在出图 / 并发上限'], ['状态']],
+    [['上游秘钥'], ['类型'], ['优先级', 'num'], ['正在出图 / 并发上限'], ['状态']],
     shownKeys.map((k) => {
       const full = k.concurrency > 0 && k.active >= k.concurrency;
       const meter = k.concurrency > 0
         ? `<span class="meter ${full ? 'full' : ''}"><span style="width:${Math.min(100, (k.active / k.concurrency) * 100)}%"></span></span>`
         : '';
+      const account = k.account;
+      const free = !k.free_only ? ''
+        : !account?.live ? ' <span class="badge err">账号状态未知，不接请求</span>'
+          : !account.opus ? ' <span class="badge err">不是有效的 Opus，不接请求</span>'
+            : account.usage_negative ? ' <span class="badge err">NAI5 免费额度用完，只接 NAI4.5 及以前</span>'
+              : ' <span class="badge ok">只出免费图</span>';
       return [
         esc(k.name),
         UPSTREAM_TYPES[k.type] ?? esc(k.type),
+        fmtNum(k.priority),
         `${k.active} / ${k.concurrency || '不限'}${meter}`,
-        k.cooling ? '<span class="badge err">冷却中</span>' : full ? '<span class="badge">已满</span>' : '<span class="badge ok">有空位</span>',
+        (k.cooling ? '<span class="badge err">冷却中</span>' : full ? '<span class="badge">已满</span>' : '<span class="badge ok">有空位</span>') + free,
       ];
     }),
     '没有启用的上游秘钥');
 
   renderTable($('#queue-running'),
-    [['#'], ['上游秘钥'], ['调用密钥'], ['接口'], ['模型'], ['尺寸'], ['出图中', 'num'], ['排队了', 'num'], ['提示词']],
+    [['#'], ['上游秘钥'], ['调用密钥'], ['接口'], ['模型'], ['尺寸'], ['Anlas（估）', 'num'], ['出图中', 'num'], ['排队了', 'num'], ['提示词']],
     shownRunning.map((job) => [
       job.id, esc(job.key_name), esc(job.caller ?? '—'), ENDPOINTS[job.endpoint] ?? esc(job.endpoint ?? '—'),
-      esc(job.model ?? job.upstream_model), queueSize(job), fmtSeconds(now - job.started_at),
+      esc(job.model ?? job.upstream_model),
+      queueSize(job) + (job.adjusted?.length ? `<br><span class="muted" title="${esc(job.adjusted.join('，'))}">已按上限调整</span>` : ''),
+      job.anlas == null ? '—' : job.anlas ? fmtNum(job.anlas) : '免费',
+      fmtSeconds(now - job.started_at),
       job.queue_ms >= 1000 ? fmtSeconds(job.queue_ms) : '—', queuePrompt(job),
     ]),
     '现在没有在出图的请求');

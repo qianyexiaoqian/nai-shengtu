@@ -93,11 +93,13 @@ export function aspectToSize(ratio) {
  */
 export function toUpstreamPayload(body, prompt, inline, upstreamModel) {
   const payload = { model: upstreamModel, prompt };
+  // 只收字符串、数字、布尔：对象、数组之类的值后面算上限和 Anlas 时会出错，不往下传
+  const usable = (value) => ['string', 'number', 'boolean'].includes(typeof value) && value !== '';
   for (const key of UPSTREAM_FIELDS) {
-    if (body[key] != null && body[key] !== '') payload[key] = body[key];
+    if (usable(body[key])) payload[key] = body[key];
   }
   for (const key of NAI_FIELDS) {
-    if (body[key] != null && body[key] !== '') (payload.nai ??= {})[key] = body[key];
+    if (usable(body[key])) (payload.nai ??= {})[key] = body[key];
   }
   // 上游在 negative 和 negative_prompt 同时存在时取 negative；统一成 negative_prompt，行内 --no 才能覆盖
   if (body.negative != null && body.negative !== '') payload.negative_prompt = body.negative;

@@ -1,12 +1,16 @@
 import { isIP } from 'node:net';
+import { anlasCost } from './anlas.js';
 import { config } from './config.js';
+import { db } from './db.js';
 import { HttpError } from './http.js';
-import {
-  NOVELAI_ACCOUNT_API, NOVELAI_BASE, NOVELAI_MODELS, novelaiAccount, novelaiBody, novelaiImages, novelaiRequest,
-} from './novelai.js';
+import { applyLimits } from './limits.js';
+import { barUsedSince, markBarUsed, needsFreshBar, noteAccountUsed, refreshAccount } from './naiAccounts.js';
+import { NOVELAI_MODELS, novelaiBody, novelaiImages, novelaiRequest, novelaiShape } from './novelai.js';
 import { acquireKey, createJob, releaseKey } from './queue.js';
 import { getSettings } from './settings.js';
-import { allBaseUrls, candidateKeys, markKeyFailed, markKeyUsed, upstreamBases } from './upstreamKeys.js';
+import {
+  allBaseUrls, candidateKeys, liveAccount, markKeyFailed, markKeyUsed, savedAccount, upstreamBases,
+} from './upstreamKeys.js';
 
 // 这些状态说明是这把上游秘钥的问题（失效、点数不足、不允许该模型、限流），上游没出图也没扣点，换下一把重试。
 // 超时、5xx 不切换：上游可能已经出图扣点，重试会重复扣费。
@@ -20,18 +24,18 @@ const UNAVAILABLE = '生图失败：服务暂时不可用，请联系管理员';
  * 在支持这个模型的上游秘钥里轮询，按秘钥的类型调它的接口地址（OpenAI 兼容的 /images/generations，
  * 或 NovelAI 官方的 /ai/generate-image），遇到秘钥自身的问题自动换下一把。
  * 统一返回 OpenAI 格式：图片在 data[].url（上游地址，不能直接给调用方，见 imageStore.js）或 data[].b64_json 里。
- * 秘钥按并发上限取，都满了在号池里排队（见 queue.js）；signal 断开时取消排队，info 给后台排队列表显示。
- * 返回 { body, upstreamKey, queueMs }；失败抛出的错误上带 upstreamKey（最后尝试的那把）和 queueMs（排队等了多久）。
+ * 秘钥按优先级和并发上限取，都满了在号池里排队（见 queue.js）；signal 断开时取消排队，info 给后台排队列表显示。
+ * 取到秘钥后按它的出图上限压尺寸、步数、张数（见 limits.js），换秘钥时按新秘钥的上限重新算；
+ * “只出免费图”的官方秘钥只接压完之后不花 Anlas 的请求（见 anlas.js），接不了的不排给它。
+ * 返回 { body, upstreamKey, queueMs, applied }，applied 是实际发出去的 { size, n, seed, anlas, changes }；
+ * 失败抛出的错误上带 upstreamKey（最后尝试的那把）、queueMs（排队等了多久）和 applied。
  */
 export async function generateImages(payload, { signal, info } = {}) {
-  const notConfigured = () => new HttpError(503, '服务暂未就绪，请联系管理员', {
-    type: 'server_error',
-    code: 'not_configured',
-    internal: `没有能用的上游秘钥（或者都不支持模型 ${payload.model}），请在后台“上游秘钥”页添加、启用，或者给秘钥加上这个模型`,
-  });
-  if (!candidateKeys(payload.model).length) throw notConfigured();
+  const unservable = servableError(payload);
+  if (unservable) throw unservable;
   const job = createJob(payload.model, {
     signal,
+    accepts: (key) => planFor(key, payload).ok,
     info: { upstream_model: payload.model, size: payload.size ?? '1024x1024', n: payload.n ?? 1, ...info },
   });
   let lastError;
@@ -45,22 +49,120 @@ export async function generateImages(payload, { signal, info } = {}) {
       throw err;
     }
     if (!key) break;
+    if (needsFreshBar(key, payload.model)) {
+      // 只出免费图的官方秘钥出 NAI5：手上的用量条是上一张出完之前查的，占着这把秘钥的位子先查一次再决定
+      await refreshAccount(key, { after: barUsedSince(key) }).catch(() => {});
+      key = db.prepare('SELECT * FROM upstream_keys WHERE id = ? AND enabled = 1').get(key.id) ?? { ...key, enabled: 0 };
+    }
+    const plan = key.enabled ? planFor(key, payload) : { ok: false };
+    if (!plan.ok) {
+      // 排队时或刚查完账号状态变了（比如 NAI5 免费额度用完）、秘钥被停用了：这把不发了，放回去重新挑
+      releaseKey(job);
+      job.tried.delete(key.id);
+      continue;
+    }
+    Object.assign(job.info, { size: plan.applied.size, n: plan.applied.n, anlas: plan.applied.anlas, adjusted: plan.applied.changes });
     try {
-      const body = key.type === 'novelai' ? await requestNovelai(key, payload) : await requestGeneration(key, payload);
+      const body = key.type === 'novelai'
+        ? await requestNovelai(key, payload, plan.shape)
+        : await requestGeneration(key, plan.payload);
       markKeyUsed(key);
-      return { body, upstreamKey: key, queueMs: job.queueMs };
+      return { body, upstreamKey: key, queueMs: job.queueMs, applied: plan.applied };
     } catch (err) {
       err.upstreamKey = key;
       err.queueMs = job.queueMs;
+      err.applied = plan.applied;
       const missing = isModelMissing(err);
       if (!missing && !FAILOVER_STATUSES.has(err.upstreamStatus)) throw err;
       markKeyFailed(key, err.upstreamStatus, err.internal ?? err.message, !missing);
       lastError = err;
     } finally {
+      markBarUsed(key, payload.model); // 先记下用过 NAI5 的用量条，再让下一个请求用这把秘钥
       releaseKey(job);
+      noteAccountUsed(key); // 官方秘钥出过图（或被拒）后查一下账号给后台看
     }
   }
-  throw lastError ?? notConfigured();
+  throw lastError ?? servableError(payload) ?? notConfiguredError(payload.model);
+}
+
+/**
+ * 现在有没有上游秘钥能接这个请求，没有就给出该报的错：没有能接这个模型的秘钥 → 未配置；
+ * 有，但都是官方秘钥、压完上限还是单张超过 140 Anlas → 参数太大；都是“只出免费图”、只是请求超出免费范围 → 400；
+ * 账号那边的原因（用量条用完、不是 Opus、状态未知）→ 免费额度用不了。
+ */
+export function servableError(payload) {
+  const plans = candidateKeys(payload.model).map((key) => ({ key, plan: planFor(key, payload) }));
+  if (!plans.length) return notConfiguredError(payload.model);
+  if (plans.some(({ plan }) => plan.ok)) return null;
+  const reasons = plans.map(({ key, plan }) => `${key.name || `#${key.id}`}：${plan.anlas.why}，要 ${plan.anlas.total} Anlas`);
+  if (plans.every(({ plan }) => plan.anlas.refused)) {
+    return new HttpError(400, '尺寸或步数太大了，请调小一些再试', {
+      code: 'too_expensive',
+      internal: `单张超过 140 Anlas（官网也不让这么出）：${reasons.join('；')}`,
+    });
+  }
+  if (plans.every(({ plan }) => plan.anlas.refused || !plan.anlas.accountReason)) {
+    return new HttpError(400, '这次请求超出了免费出图的范围（1024×1024 以内、28 步以内、一次 1 张），请调小再试', {
+      code: 'outside_free_range',
+      internal: `只出免费图的官方秘钥按出图上限压完还要花 Anlas：${reasons.join('；')}`,
+    });
+  }
+  const barOnly = plans.every(({ plan }) => plan.anlas.barOnly);
+  return new HttpError(503, barOnly ? 'NAI5 的免费额度暂时用完了，请稍后再试，或者换 NAI4.5 及更早的模型' : '免费出图额度暂时用不了，请稍后再试', {
+    type: 'server_error',
+    code: 'free_quota_exhausted',
+    internal: `只出免费图的官方秘钥这次都要花 Anlas，没有发出去：${reasons.join('；')}`,
+  });
+}
+
+/**
+ * 这个请求最多会出几张：能接它的秘钥里按出图上限压完最多的那个（比如官方秘钥一次只出 1 张，要 4 张也只占 1 张额度）。
+ * 都接不了时按要的张数算（后面会报错，不出图）。
+ */
+export function plannedImages(payload) {
+  const counts = candidateKeys(payload.model)
+    .map((key) => planFor(key, payload))
+    .filter((plan) => plan.ok)
+    .map((plan) => plan.applied.n);
+  return counts.length ? Math.max(...counts) : (payload.n ?? 1);
+}
+
+const notConfiguredError = (model) => new HttpError(503, '服务暂未就绪，请联系管理员', {
+  type: 'server_error',
+  code: 'not_configured',
+  internal: `没有能用的上游秘钥（或者都不支持模型 ${model}），请在后台“上游秘钥”页添加、启用，或者给秘钥加上这个模型`,
+});
+
+/**
+ * 按这把秘钥的出图上限定下实际发的尺寸、步数、张数，ok 表示这把秘钥接不接这个请求。
+ * 官方的按补上默认值后的实际参数压（没写步数也是 28 步；medium 固定 14 步，不压步数），再按账号状态算 Anlas：
+ * 单张超过 140 的不接，“只出免费图”的要花 Anlas 就不接。
+ * OpenAI 兼容的只压请求里写了的（没写步数就是上游自己的默认，中继不知道是多少），没写尺寸按 1024x1024 算。
+ */
+function planFor(key, payload) {
+  if (key.type === 'novelai') {
+    const limits = /-medium/.test(payload.model) ? { ...key, max_steps: 0 } : key;
+    const { shape, changes } = applyLimits(novelaiShape(payload), limits);
+    // 接不接按算数的账号状态（liveAccount）判断；记账的估算用存着的最近一次状态，从来没查到过就不估
+    const anlas = anlasCost(payload.model, shape, liveAccount(key));
+    const known = savedAccount(key);
+    const estimate = known?.checked_at ? anlasCost(payload.model, shape, known).total : null;
+    return {
+      payload,
+      shape,
+      anlas,
+      ok: !anlas.refused && (!key.free_only || anlas.free),
+      applied: { size: `${shape.width}x${shape.height}`, n: shape.n, seed: shape.seed, anlas: estimate, changes },
+    };
+  }
+  const [width, height] = (/^(\d+)x(\d+)$/.exec(payload.size ?? '') ?? [0, 1024, 1024]).slice(1).map(Number);
+  const wanted = { width, height, steps: payload.steps, n: payload.n ?? 1 };
+  const { shape, changes } = applyLimits(wanted, key);
+  const sent = { ...payload };
+  if (shape.width !== width || shape.height !== height) sent.size = `${shape.width}x${shape.height}`;
+  if (shape.steps !== wanted.steps) sent.steps = shape.steps;
+  if (shape.n !== wanted.n) sent.n = shape.n;
+  return { payload: sent, ok: true, applied: { size: sent.size ?? `${width}x${height}`, n: shape.n, seed: payload.seed, changes } };
 }
 
 /**
@@ -80,9 +182,9 @@ async function requestGeneration(key, { nai: _nai, ...payload }) {
   throw upstreamError(res.status, body);
 }
 
-/** NovelAI 官方：转成官方请求，图片从 ZIP 里取出来，按 OpenAI 格式的 b64_json 返回 */
-async function requestNovelai(key, payload) {
-  const { body, headers } = novelaiBody(novelaiRequest(payload));
+/** NovelAI 官方：按 shape（已按秘钥上限压过）转成官方请求，图片从 ZIP 里取出来，按 OpenAI 格式的 b64_json 返回 */
+async function requestNovelai(key, payload, shape) {
+  const { body, headers } = novelaiBody(novelaiRequest(payload, shape));
   let res;
   try {
     res = await fetch(`${key.base_url}/ai/generate-image`, {
@@ -185,21 +287,6 @@ export function listModels() {
       return { baseUrl, error: err.cause?.message || err.message };
     }
   }));
-}
-
-/**
- * NovelAI 官方秘钥的套餐和 Anlas 余额（GET api.novelai.net/user/subscription），顺便验证令牌能不能用。
- * 接口地址不是官方的（自建反代之类）查不了，返回 null。
- */
-export async function fetchNovelaiAccount(baseUrl, key) {
-  if (baseUrl !== NOVELAI_BASE) return null;
-  const res = await fetch(`${NOVELAI_ACCOUNT_API}/user/subscription`, {
-    headers: { Authorization: `Bearer ${key}` },
-    signal: AbortSignal.timeout(15_000),
-  });
-  const body = await res.json().catch(() => null);
-  if (!res.ok) throw new Error(`HTTP ${res.status}${body?.message ? `：${body.message}` : ''}`);
-  return novelaiAccount(body);
 }
 
 const TLDS =

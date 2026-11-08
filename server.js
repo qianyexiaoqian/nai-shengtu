@@ -10,9 +10,10 @@ import { handleImages } from './src/images.js';
 import { authenticate } from './src/keys.js';
 import { handleModels, seedModels } from './src/models.js';
 import { handleNaiGenerate, handleNaiSubscription } from './src/naiApi.js';
+import { startAccountRefresh } from './src/naiAccounts.js';
 import { handlePromptApi } from './src/promptTools.js';
 import { convertText, recommendArtists, relatedTags } from './src/tags.js';
-import { seedUpstreamKeys, upstreamKeyOrder } from './src/upstreamKeys.js';
+import { candidateKeys, seedUpstreamKeys } from './src/upstreamKeys.js';
 
 const ADMIN_PAGE = new URL('./public/admin.html', import.meta.url);
 const PROMPT_PAGE = new URL('./public/prompt.html', import.meta.url);
@@ -78,6 +79,8 @@ initAdminPassword();
 seedModels();
 seedUpstreamKeys();
 purgeExpiredImages();
+// 官方秘钥的账号状态（Anlas、Opus 用量条）：启动时查一次，之后每 5 分钟查一次
+startAccountRefresh();
 setInterval(purgeExpiredImages, 3_600_000).unref();
 
 /** 能访问到本服务的地址：监听 0.0.0.0 时列出本机所有 IPv4，否则就是监听的那个地址 */
@@ -95,7 +98,7 @@ server.listen(config.port, config.host, () => {
   for (const host of reachableHosts()) {
     console.log(`  API：http://${host}:${config.port}/v1（NovelAI 格式填 http://${host}:${config.port}）    后台：/admin    提词器：/prompt`);
   }
-  if (!upstreamKeyOrder().length) console.warn('还没有可用的上游秘钥，请登录后台在“上游秘钥”页添加');
+  if (!candidateKeys().length) console.warn('还没有可用的上游秘钥，请登录后台在“上游秘钥”页添加');
   // 标签库约 0.5 秒才加载完，启动后先加载，免得第一个请求卡一下
   setImmediate(() => {
     convertText('预热');

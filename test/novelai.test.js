@@ -10,7 +10,7 @@ const { handleNaiGenerate, handleNaiSubscription } = await import('../src/naiApi
 const { novelaiBody, novelaiRequest } = await import('../src/novelai.js');
 const { toUpstreamPayload } = await import('../src/params.js');
 const { generateImages } = await import('../src/upstream.js');
-const { addUpstreamKeys, listUpstreamKeys, updateUpstreamKey } = await import('../src/upstreamKeys.js');
+const { addUpstreamKeys, listUpstreamKeys, saveAccount, updateUpstreamKey } = await import('../src/upstreamKeys.js');
 const { readZip, writeZip } = await import('../src/zip.js');
 
 const PNG = Buffer.concat([Buffer.from('89504e470d0a1a0a', 'hex'), Buffer.from('fake png')]);
@@ -25,6 +25,9 @@ const zipReply = (...images) =>
     headers: { 'Content-Type': 'application/zip' },
   });
 const jsonReply = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
+// 官方秘钥默认“只出免费图”，要先有账号状态才接请求：这里当成查到了一个有效的 Opus 账号
+const opus = (id) => saveAccount(id, { level: 3, tier: 'Opus', active: true, anlas: 10000, usage_negative: false, usage_percent: 80 });
+const idOf = (token) => listUpstreamKeys().find((k) => k.key_hint === `${token.slice(0, 6)}…${token.slice(-4)}`).id;
 
 /** 假的 NovelAI 官方：记下每次请求的地址、令牌和解析好的请求体；发给本机测试服务器的请求照常放行 */
 function fakeNovelai(handler) {
@@ -97,18 +100,34 @@ test('提示词里有 nsfw 时负面预设去掉 nsfw；可以关掉质量词、
   assert.deepEqual([medium.parameters.steps, medium.parameters.sampler, medium.parameters.ucPresetId], [14, 'k_euler_ancestral', 'heavy']);
 });
 
-test('官方上游：请求 /ai/generate-image，ZIP 里的图片转成 b64_json', async () => {
+test('官方上游：请求 /ai/generate-image，ZIP 里的图片转成 b64_json；默认 Opus 免费档、只出免费图', async () => {
   addUpstreamKeys({ keys: 'pst-aaaaaaaa1', type: 'novelai', base_url: '', name: '官方' });
   const [key] = listUpstreamKeys();
   assert.deepEqual([key.type, key.base_url], ['novelai', 'https://image.novelai.net']);
+  assert.deepEqual([key.max_pixels, key.max_steps, key.max_n, key.free_only, key.priority], [1048576, 28, 1, 1, 0]);
 
+  // 账号状态还不知道：只出免费图的秘钥不接，直接 503，不发请求
   const calls = fakeNovelai(() => zipReply(PNG, PNG));
-  const { body } = await generateImages({ model: 'nai-diffusion-4-5-full', prompt: '1girl', n: 2 });
+  const unknown = await generateImages({ model: 'nai-diffusion-4-5-full', prompt: '1girl' }).catch((e) => e);
+  assert.deepEqual([unknown.status, unknown.code, calls.length], [503, 'free_quota_exhausted', 0]);
+  assert.match(unknown.internal, /账号状态未知/);
+
+  opus(key.id);
+  const one = await generateImages({ model: 'nai-diffusion-4-5-full', prompt: '1girl', n: 2 });
   assert.equal(calls[0].url, 'https://image.novelai.net/ai/generate-image');
   assert.equal(calls[0].token, 'pst-aaaaaaaa1');
   assert.equal(calls[0].multipart, false);
-  assert.equal(calls[0].request.parameters.n_samples, 2);
+  assert.equal(calls[0].request.parameters.n_samples, 1); // 一次 2 张：第 2 张要花 Anlas，按上限压成 1 张
+  assert.deepEqual(one.applied.changes, ['张数 2 → 1']);
+  assert.equal(one.applied.anlas, 0);
+
+  // 不限张数、也不限只出免费图：照要的出 2 张
+  updateUpstreamKey(key.id, { max_n: 0, free_only: false });
+  const { body, applied } = await generateImages({ model: 'nai-diffusion-4-5-full', prompt: '1girl', n: 2 });
+  assert.equal(calls[1].request.parameters.n_samples, 2);
+  assert.equal(applied.anlas, 20); // Opus 第一张免费，第二张按 V4.5 1024x1024、28 步收 20
   assert.deepEqual(body.data.map((d) => d.b64_json), [PNG.toString('base64'), PNG.toString('base64')]);
+  updateUpstreamKey(key.id, { max_n: 1, free_only: true });
 });
 
 test('同一把官方秘钥的请求排队，不会并发（官方并发会 429）', async () => {
@@ -133,6 +152,7 @@ test('同一把官方秘钥的请求排队，不会并发（官方并发会 429�
 
 test('官方 402（Anlas 不足）：换下一把，这把冷却；调用方看不到上游原话', async () => {
   addUpstreamKeys({ keys: 'pst-bbbbbbbb2', type: 'novelai' });
+  opus(idOf('pst-bbbbbbbb2'));
   const calls = fakeNovelai((call) =>
     call.token === 'pst-aaaaaaaa1' ? jsonReply(402, { statusCode: 402, message: 'Insufficient Anlas' }) : zipReply(PNG));
   for (let i = 0; i < 2; i++) await generateImages({ model: 'nai-diffusion-5-full', prompt: 'cat' });
@@ -160,13 +180,15 @@ test('拉取模型：官方秘钥给内置模型列表，并查套餐和 Anlas',
   const calls = fakeNovelai(() =>
     jsonReply(200, { tier: 3, active: true, trainingStepsLeft: { fixedTrainingStepsLeft: 10000, purchasedTrainingSteps: 500 } }));
   const pulled = await pullUpstreamModels({ type: 'novelai', keys: 'pst-cccccccc3' });
-  assert.equal(calls[0].url, 'https://api.novelai.net/user/subscription');
+  assert.equal(calls[0].url, 'https://image.novelai.net/user/subscription');
   assert.equal(pulled.base_url, 'https://image.novelai.net');
   assert.ok(pulled.models.includes('nai-diffusion-5-full'));
   assert.deepEqual([pulled.account.tier, pulled.account.anlas], ['Opus', 10500]);
 
+  // 令牌不对、反代没转 /user/subscription：照样列出模型，把查账号的错误带回去
   globalThis.fetch = async () => jsonReply(401, { statusCode: 401, message: 'Invalid accessToken' });
-  await assert.rejects(pullUpstreamModels({ type: 'novelai', keys: 'pst-badbadbad' }), { status: 502, message: /验证 NovelAI 令牌失败/ });
+  const bad = await pullUpstreamModels({ type: 'novelai', keys: 'pst-badbadbad' });
+  assert.deepEqual([bad.account, bad.account_error, bad.models.length > 0], [null, 'HTTP 401：Invalid accessToken', true]);
 });
 
 // ---------- 对外的 NovelAI 格式接口 ----------

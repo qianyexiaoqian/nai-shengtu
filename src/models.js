@@ -1,8 +1,9 @@
 import { db } from './db.js';
 import { HttpError, sendJson } from './http.js';
+import { fetchNovelaiAccount, refreshAccount } from './naiAccounts.js';
 import { getSettings } from './settings.js';
-import { fetchModelIds, fetchNovelaiAccount, listModels as listUpstreamModels } from './upstream.js';
-import { upstreamTarget } from './upstreamKeys.js';
+import { fetchModelIds, listModels as listUpstreamModels } from './upstream.js';
+import { getUpstreamKey, upstreamTarget } from './upstreamKeys.js';
 
 // 有的 NAI 上游会列出 director，它是图像处理功能，不能文生图
 const notImageModel = (id) => id === 'director';
@@ -95,20 +96,32 @@ export async function upstreamModelOptions() {
 /**
  * 后台“上游秘钥”页的“拉取模型”：查一个上游接口地址的模型列表，用来勾选这把秘钥支持哪些模型。
  * target 是 { id }（已添加的秘钥）或 { type, base_url, keys }（添加表单里填的）。
- * NovelAI 官方没有模型列表接口，给内置的官方模型，同时查一下令牌对应账号的套餐和 Anlas（顺便验证令牌）。
+ * NovelAI 官方没有模型列表接口，给内置的官方模型，同时查一下令牌对应账号的套餐、Anlas 和 Opus 用量条（顺便验证令牌），
+ * 已添加的秘钥顺手存下来（“只出免费图”要用）。
  */
 export async function pullUpstreamModels(target) {
   const { baseUrl, key, type } = upstreamTarget(target);
   let ids;
-  let account = null;
   try {
     ids = await fetchModelIds(baseUrl, key, type);
-    if (type === 'novelai') account = await fetchNovelaiAccount(baseUrl, key);
   } catch (err) {
-    const what = type === 'novelai' ? '验证 NovelAI 令牌' : '拉取模型列表';
-    throw new HttpError(502, `${what}失败：${err.cause?.message || err.message}`, { type: 'server_error' });
+    throw new HttpError(502, `拉取模型列表失败：${err.cause?.message || err.message}`, { type: 'server_error' });
   }
-  return { base_url: baseUrl, type, models: ids.filter((id) => !notImageModel(id)), account };
+  const result = { base_url: baseUrl, type, models: ids.filter((id) => !notImageModel(id)), account: null };
+  if (type !== 'novelai') return result;
+  // 查账号查不到（比如反代没转 /user/subscription）不影响列模型，把原因告诉后台
+  try {
+    if (target.id) {
+      const saved = await refreshAccount(getUpstreamKey(Number(target.id)));
+      if (saved?.error) result.account_error = saved.error;
+      else result.account = saved;
+    } else {
+      result.account = await fetchNovelaiAccount(baseUrl, key);
+    }
+  } catch (err) {
+    result.account_error = err.cause?.message || err.message;
+  }
+  return result;
 }
 
 /**

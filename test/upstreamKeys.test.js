@@ -33,8 +33,9 @@ const ids = () => Object.fromEntries(db.prepare('SELECT key, id FROM upstream_ke
 
 test('添加多把秘钥：换行和逗号都能分隔，重复的跳过，列表里不出现原文', () => {
   const added = addUpstreamKeys({ keys: 'sk-aaaaaaaa1\nsk-bbbbbbbb2, sk-cccccccc3', base_url: `${BASE}/`, name: '主', account: '主账号' });
-  assert.deepEqual(added, { added: 3, skipped: 0 });
-  assert.deepEqual(addUpstreamKeys({ keys: 'sk-aaaaaaaa1', base_url: BASE }), { added: 0, skipped: 1 });
+  assert.deepEqual([added.added, added.skipped, added.ids.length, added.type], [3, 0, 3, 'openai']);
+  const again = addUpstreamKeys({ keys: 'sk-aaaaaaaa1', base_url: BASE });
+  assert.deepEqual([again.added, again.skipped, again.ids], [0, 1, []]);
   const list = listUpstreamKeys();
   assert.deepEqual(list.map((k) => k.name), ['主-1', '主-2', '主-3']);
   assert.ok(list.every((k) => !('key' in k) && k.key_hint.includes('…') && k.base_url === BASE && k.models === ''));

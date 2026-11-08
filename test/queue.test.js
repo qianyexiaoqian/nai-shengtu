@@ -37,7 +37,8 @@ const job = (prompt, opts) =>
   generateImages({ model: 'nai-diffusion-4-5-full', prompt, size: '832x1216' }, { info: { caller: '测试', endpoint: 'images', prompt }, ...opts });
 
 test('并发：默认官方 1、OpenAI 兼容不限，可以改；超出范围报错', () => {
-  addUpstreamKeys({ keys: 'pst-queue00001', type: 'novelai', name: '官方A' });
+  // 这里只测调度，不管 Anlas：官方秘钥关掉“只出免费图”
+  addUpstreamKeys({ keys: 'pst-queue00001', type: 'novelai', name: '官方A', free_only: false });
   addUpstreamKeys({ keys: 'sk-queue000002', base_url: 'https://up.example.com/v1', name: '兼容', models: 'flux-dev' });
   const [nai, openai] = listUpstreamKeys();
   assert.deepEqual([nai.concurrency, openai.concurrency], [1, 0]);
@@ -103,7 +104,7 @@ test('排队超时返回 503；调用方断开时移出队列；排满了直接�
 });
 
 test('换秘钥：一把 402 后去下一把；下一把满了就排队，回到原来的位次', async () => {
-  addUpstreamKeys({ keys: 'pst-queue00009', type: 'novelai', name: '官方B' });
+  addUpstreamKeys({ keys: 'pst-queue00009', type: 'novelai', name: '官方B', free_only: false });
   const started = [];
   const gates = [];
   globalThis.fetch = async (url, init) => {

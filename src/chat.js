@@ -79,7 +79,7 @@ async function streamChat(res, meta, job, includeUsage) {
 }
 
 async function generateContent(job) {
-  const { images } = await executeGeneration(job);
+  const { images, adjusted } = await executeGeneration(job);
   const { chatImageMode, promptEcho } = getSettings();
   const sources = await Promise.all(
     images.map(async (image) => {
@@ -98,6 +98,8 @@ async function generateContent(job) {
     if (fixes.length) content += `\n> 已修正：${fixes.map((f) => `${f.from} → ${f.to}`).join('，')}`;
     if (unmatched.length) content += `\n> 未识别：${unmatched.join('、')}`;
   }
+  // 上游秘钥的出图上限把尺寸、步数、张数压下来了，告诉用户图为什么比要的小、少
+  if (promptEcho && adjusted.length) content += `\n\n> 已按出图上限调整：${adjusted.join('，')}`;
   return content;
 }
 

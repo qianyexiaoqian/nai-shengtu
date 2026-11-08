@@ -1,11 +1,11 @@
 import { linkAiCall, optimizePrompt, wantsAi } from './aiPrompt.js';
 import { HttpError } from './http.js';
 import { saveImage } from './imageStore.js';
-import { assertQuota, keyAllowsAi } from './keys.js';
+import { assertQuota, keyAllowsAi, reserveQuota } from './keys.js';
 import { resolveModel } from './models.js';
 import { toUpstreamPayload } from './params.js';
 import { assistPrompt } from './promptAssist.js';
-import { generateImages } from './upstream.js';
+import { generateImages, plannedImages, servableError } from './upstream.js';
 import { accountOf } from './upstreamKeys.js';
 import { recordCall } from './usage.js';
 
@@ -31,7 +31,8 @@ export function prepareGeneration(ctx, endpoint, body, prompt, params) {
     payload.negative_prompt = assistPrompt(payload.negative_prompt).prompt;
     if (!payload.negative_prompt) delete payload.negative_prompt;
   }
-  assertQuota(ctx.key, payload.n ?? 1);
+  // 额度按实际会出的张数算：官方秘钥一次只出 1 张的话，要 4 张也只占 1 张
+  assertQuota(ctx.key, plannedImages(payload));
   return { ctx, endpoint, model, payload, prompt, assist, useAi, ai: null };
 }
 
@@ -60,29 +61,21 @@ async function applyAi(job) {
 
 export async function executeGeneration(job) {
   const { ctx, endpoint, model, payload, prompt } = job;
-  if (job.useAi) await applyAi(job);
-
-  const startedAt = Date.now();
+  let startedAt = Date.now();
   const call = {
     key: ctx.key,
     endpoint,
     model,
     prompt,
-    finalPrompt: payload.prompt,
     size: payload.size ?? '1024x1024', // 上游默认尺寸
     n: payload.n ?? 1,
     ip: ctx.ip,
   };
-
-  let result;
-  try {
-    result = await generateImages(payload, {
-      signal: ctx.signal,
-      info: { caller: ctx.key.name, endpoint, model: model.id, prompt: String(payload.prompt).slice(0, 200) },
-    });
-  } catch (err) {
+  const logError = (err) => {
     const { logId } = recordCall({
       ...call,
+      finalPrompt: payload.prompt,
+      ...appliedOf(err.applied, false),
       ...upstreamOf(err.upstreamKey),
       status: 'error',
       error: err.internal ?? err.message,
@@ -90,25 +83,62 @@ export async function executeGeneration(job) {
       queueMs: err.queueMs,
     });
     linkAiCall(job.ai?.callId, logId);
-    throw err;
-  }
-
-  const { body, upstreamKey } = result;
-  const items = body.data.filter((item) => item?.url || item?.b64_json);
-  const { logId } = recordCall({
-    ...call,
-    ...upstreamOf(upstreamKey),
-    status: 'success',
-    images: items.length,
-    durationMs: Date.now() - startedAt,
-    queueMs: result.queueMs,
-  });
-  linkAiCall(job.ai?.callId, logId);
-  return {
-    model,
-    created: body.created ?? Math.floor(Date.now() / 1000),
-    images: items.map((item) => saveImage(item, logId)),
+    return err;
   };
+
+  // 额度按库里最新的已用张数加上正在出图、排队中的占住，出完记了账再放开（不然排队的请求都能过额度检查）
+  const release = reserveQuota(ctx.key, plannedImages(payload));
+  try {
+    // 先看现在有没有上游接得了（比如免费额度用完、参数太大），免得白花 AI 优化的钱，也免得聊天流开始了才报错
+    const unservable = servableError(payload);
+    if (unservable) throw logError(unservable);
+    if (job.useAi) {
+      await applyAi(job);
+      startedAt = Date.now(); // 耗时只算排队和出图，AI 优化的时间记在 AI 调用记录里
+    }
+
+    let result;
+    try {
+      result = await generateImages(payload, {
+        signal: ctx.signal,
+        info: { caller: ctx.key.name, endpoint, model: model.id, prompt: String(payload.prompt).slice(0, 200) },
+      });
+    } catch (err) {
+      throw logError(err);
+    }
+
+    const { body, upstreamKey, applied } = result;
+    const items = body.data.filter((item) => item?.url || item?.b64_json);
+    const { logId } = recordCall({
+      ...call,
+      finalPrompt: payload.prompt,
+      ...appliedOf(applied, true),
+      ...upstreamOf(upstreamKey),
+      status: 'success',
+      images: items.length,
+      durationMs: Date.now() - startedAt,
+      queueMs: result.queueMs,
+    });
+    linkAiCall(job.ai?.callId, logId);
+    return {
+      model,
+      created: body.created ?? Math.floor(Date.now() / 1000),
+      images: items.map((item) => saveImage(item, logId)),
+      adjusted: applied?.changes ?? [],
+      seed: applied?.seed,
+    };
+  } finally {
+    release();
+  }
 }
 
 const upstreamOf = (row) => (row ? { upstreamKeyId: row.id, account: accountOf(row) } : {});
+// 按上游秘钥的出图上限压过的话，日志和扣点估算按实际发出去的尺寸、张数算；官方秘钥出成了才记估算的 Anlas
+const appliedOf = (applied, success) => (applied
+  ? {
+    size: applied.size,
+    n: applied.n,
+    adjusted: applied.changes.join('，') || null,
+    anlas: success && Number.isFinite(applied.anlas) ? applied.anlas : null,
+  }
+  : {});

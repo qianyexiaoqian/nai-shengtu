@@ -1,6 +1,6 @@
 import { HttpError } from './http.js';
 import { getSettings } from './settings.js';
-import { candidateKeys, isCooling, nextRotation, rotate } from './upstreamKeys.js';
+import { byPriority, candidateKeys, isCooling, liveAccount, nextRotation, rotate, savedAccount } from './upstreamKeys.js';
 
 // 号池调度：每把上游秘钥有并发上限（concurrency，0 = 不限），能接这个模型的秘钥都满了时请求在这里排队，
 // 有秘钥空出来就按到达顺序发下一个。只在内存里，重启后排队中的请求随连接一起断开。
@@ -12,10 +12,13 @@ let seq = 0;
 const limitOf = (key) => (key.concurrency > 0 ? key.concurrency : Infinity);
 const hasRoom = (key) => (active.get(key.id) ?? 0) < limitOf(key);
 
-/** 一次出图请求在调度里的记录。info 给后台排队列表看：调用密钥、接口、模型、尺寸、张数、提示词 */
-export function createJob(model, { signal, info = {} } = {}) {
+/**
+ * 一次出图请求在调度里的记录。info 给后台排队列表看：调用密钥、接口、模型、尺寸、张数、提示词；
+ * accepts(key) 判断这把秘钥接不接这个请求（“只出免费图”的官方秘钥这次要花 Anlas 就不接，见 upstream.js）
+ */
+export function createJob(model, { signal, info = {}, accepts = () => true } = {}) {
   return {
-    id: ++seq, model, signal, info, rotation: nextRotation(), createdAt: Date.now(),
+    id: ++seq, model, signal, info, accepts, rotation: nextRotation(), createdAt: Date.now(),
     tried: new Set(), key: null, startedAt: null, queueMs: 0,
   };
 }
@@ -25,6 +28,7 @@ export function createJob(model, { signal, info = {} } = {}) {
  * 轮到了再给；一把能试的都没有了给 null。排队超时、排队人数满了、调用方断开时抛错。
  */
 export function acquireKey(job) {
+  dispatch(); // 先让排队的请求挑（刚空出来、刚变得能用的秘钥轮不到后来的）
   const picked = pick(job, new Map());
   if (picked !== undefined) {
     if (picked) start(job, picked);
@@ -50,6 +54,7 @@ export function acquireKey(job) {
       reject(err);
     };
     const onAbort = () => leave(closedError());
+    job.fail = leave;
     const timer = setTimeout(() => leave(new HttpError(503, `排队超过 ${Math.round(queueTimeoutMs / 1000)} 秒还没轮到，请稍后再试`, {
       type: 'server_error', code: 'queue_timeout',
     })), queueTimeoutMs);
@@ -78,7 +83,13 @@ export function releaseKey(job) {
 export function dispatch() {
   const cache = new Map();
   for (const job of [...waiting]) {
-    const picked = pick(job, cache);
+    let picked;
+    try {
+      picked = pick(job, cache);
+    } catch (err) {
+      job.fail(err); // 出问题的只让这一个请求失败，别的照常调度，也不能让定时器把进程带崩
+      continue;
+    }
     if (picked === undefined) continue;
     remove(job);
     job.wake(picked);
@@ -89,17 +100,29 @@ export function dispatch() {
 setInterval(dispatch, 1000).unref();
 
 /**
- * 这个请求现在能用哪把：秘钥按这个请求的轮询起点转一圈，有没在冷却的就只用它们（都满了就等），
+ * 这个请求现在能用哪把：优先级高的在前，同优先级的按这个请求的轮询起点转一圈；
+ * 有没在冷却的就只用它们，从高优先级往下找第一把有空位的（高的满了用低的，都满了就等），
  * 全在冷却才试冷却中的。返回秘钥；undefined = 都满了要等；null = 没有能试的了。
  */
 function pick(job, cache) {
-  if (!cache.has(job.model)) cache.set(job.model, candidateKeys(job.model));
-  // 先整圈转好再去掉试过的，换秘钥时接着往下一把走
-  const keys = rotate(cache.get(job.model), job.rotation).filter((k) => !job.tried.has(k.id));
+  if (!cache.has(job.model)) cache.set(job.model, byPriority(candidateKeys(job.model)));
+  // 不接这个请求的先去掉再转（不然挨着它的那把会多分一倍）；试过的转完再去掉，换秘钥时接着往下一把走
+  const keys = cache.get(job.model)
+    .flatMap((group) => rotate(group.filter((k) => accepts(job, k)), job.rotation))
+    .filter((k) => !job.tried.has(k.id));
   if (!keys.length) return null;
   const now = Date.now();
   const healthy = keys.filter((k) => !isCooling(k.id, now));
   return (healthy.length ? healthy : keys).find(hasRoom);
+}
+
+/** job.accepts 出了异常（比如请求里有算不了的值）就当这把不接 */
+function accepts(job, key) {
+  try {
+    return Boolean(job.accepts(key));
+  } catch {
+    return false;
+  }
 }
 
 function start(job, key) {
@@ -130,10 +153,17 @@ export function queueSnapshot() {
   const view = (job) => ({ id: job.id, ...job.info, created_at: job.createdAt });
   return {
     now,
-    keys: candidateKeys().map((k) => ({
-      id: k.id, name: keyName(k), type: k.type, concurrency: k.concurrency,
-      active: active.get(k.id) ?? 0, cooling: isCooling(k.id, now),
-    })),
+    keys: byPriority(candidateKeys()).flat().map((k) => {
+      const account = k.type === 'novelai' ? savedAccount(k) : null;
+      return {
+        id: k.id, name: keyName(k), type: k.type, concurrency: k.concurrency, priority: k.priority,
+        active: active.get(k.id) ?? 0, cooling: isCooling(k.id, now), free_only: k.type === 'novelai' && Boolean(k.free_only),
+        // 只出免费图的官方秘钥看得到的账号状态：查不到、最近一次查失败、太久没查成功时它不接请求；不是有效的 Opus 也不接
+        account: account && {
+          ...account, live: Boolean(liveAccount(k, now)), opus: account.level >= 3 && account.active,
+        },
+      };
+    }),
     running: [...running.values()].map((job) => ({
       ...view(job), key_id: job.key.id, key_name: keyName(job.key), key_type: job.key.type,
       started_at: job.startedAt, queue_ms: job.queueMs,
@@ -142,7 +172,7 @@ export function queueSnapshot() {
       ...view(job),
       position: i + 1,
       retry: job.tried.size > 0, // 已经在别的秘钥上失败过，换秘钥重新排队
-      candidates: candidateKeys(job.model).filter((k) => !job.tried.has(k.id)).map((k) => k.id),
+      candidates: candidateKeys(job.model).filter((k) => !job.tried.has(k.id) && accepts(job, k)).map((k) => k.id),
     })),
   };
 }

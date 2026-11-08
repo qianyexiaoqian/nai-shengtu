@@ -2,9 +2,8 @@ import { readZip } from './zip.js';
 
 // NovelAI 官方接口：上游类型选“NovelAI 官方”的秘钥（官网 Account Settings 里生成的 pst- 持久令牌）走这里。
 // 出图 POST <地址>/ai/generate-image，请求体 { input, model, action, parameters }，返回 ZIP；
-// 账号信息在另一个域名 api.novelai.net。字段和默认值照官方网页端，见 https://image.novelai.net/docs/index.html
+// 账号信息 GET <地址>/user/subscription（见 naiAccounts.js）。字段和默认值照官方网页端，见 https://image.novelai.net/docs/index.html
 export const NOVELAI_BASE = 'https://image.novelai.net';
-export const NOVELAI_ACCOUNT_API = 'https://api.novelai.net';
 
 // 生图接口没有 /models，“拉取模型”时列这些
 export const NOVELAI_MODELS = [
@@ -117,7 +116,20 @@ const isV4Plus = (family) => !['v3', 'furry3'].includes(family);
 const NO_SCHEDULE = new Set(['ddim', 'ddim_v3', 'plms', 'k_lms', 'k_dpm_fast']);
 const MAX_SEED = 4294967295 - 7;
 
-const toNumber = (value) => (value === '' || value == null || !Number.isFinite(Number(value)) ? undefined : Number(value));
+// 只认数字和数字字符串；对象之类的值（{ toString: 1 } 转数字会抛异常）当没给
+const toNumber = (value) =>
+  ((typeof value === 'number' || (typeof value === 'string' && value.trim() !== '')) && Number.isFinite(Number(value))
+    ? Number(value)
+    : undefined);
+const toText = (value, fallback) => (typeof value === 'string' && value.trim() ? value.trim() : fallback);
+// 开关类参数严格认：字符串 "false"、"0" 是关（Boolean("false") 是 true，会把 SMEA 打开、多花 Anlas）
+const toFlag = (value, fallback = false) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'number') return value !== 0;
+  if (typeof value === 'string' && value.trim()) return /^(true|1|yes|on)$/i.test(value.trim());
+  return fallback;
+};
+const plainObject = (value) => (value && typeof value === 'object' && !Array.isArray(value) ? value : {});
 const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
 const tags = (text) => String(text ?? '').split(',').map((t) => t.trim()).filter(Boolean);
 
@@ -143,23 +155,53 @@ function presetNegative(family, name, prompt) {
 }
 
 /**
- * 中继内部的出图参数 → NovelAI 官方请求 { input, model, action, parameters }。
+ * 这次实际发给官方的尺寸、步数、张数（补上默认值：1024x1024、28 步、1 张；medium 模型固定 14 步）。
+ * 秘钥的出图上限按它来压（见 limits.js），压完再交给 novelaiRequest。
+ */
+export function novelaiShape(payload) {
+  const nai = payload.nai ?? {};
+  const raw = nai.parameters ?? {};
+  const medium = /-medium/.test(payload.model);
+  const [width, height] = novelaiSize(payload.size);
+  // nai_smea / nai_smea_dyn 是旧写法：换成 k_euler_ancestral 加 SMEA；SMEA 只有 NAI3 有，ddim 不能开
+  let sampler = medium ? 'k_euler_ancestral' : toText(payload.sampler, toText(raw.sampler, 'k_euler_ancestral'));
+  let sm = toFlag(nai.sm ?? raw.sm);
+  let dyn = toFlag(nai.sm_dyn ?? raw.sm_dyn);
+  if (/^nai_smea(_dyn)?$/.test(sampler)) {
+    sm = true;
+    dyn ||= sampler === 'nai_smea_dyn';
+    sampler = 'k_euler_ancestral';
+  }
+  if (isV4Plus(novelaiFamily(payload.model)) || /^ddim/.test(sampler)) sm = false;
+  const seed = toNumber(payload.seed);
+  return {
+    width,
+    height,
+    steps: medium ? 14 : clamp(Math.trunc(toNumber(payload.steps) ?? toNumber(raw.steps) ?? 28), 1, 50),
+    n: clamp(Math.trunc(toNumber(payload.n) ?? 1), 1, 4),
+    sampler,
+    sm,
+    sm_dyn: sm && dyn,
+    seed: Number.isInteger(seed) && seed >= 0 && seed <= MAX_SEED ? seed : Math.floor(Math.random() * MAX_SEED),
+  };
+}
+
+/**
+ * 中继内部的出图参数 → NovelAI 官方请求 { input, model, action, parameters }，尺寸、步数、张数取 shape。
  * payload 是 OpenAI Images 风格的（prompt / negative_prompt / size / n / steps / scale / sampler / seed / noise_schedule），
  * payload.nai 是只有官方接口用得到的：
  * - { qualityToggle, ucPreset, cfg_rescale, sm, sm_dyn }：OpenAI 格式请求里带的，中继照网页端拼质量词和负面预设；
  * - { enhanced: true, parameters }：NovelAI 格式进来的请求，客户端已经拼好，参数原样带上，只覆盖提示词、模型、尺寸这些。
  */
-export function novelaiRequest(payload) {
+export function novelaiRequest(payload, shape = novelaiShape(payload)) {
   const model = payload.model;
   const family = novelaiFamily(model);
   const nai = payload.nai ?? {};
   const raw = nai.parameters ?? {};
   const medium = /-medium/.test(model);
-  const [width, height] = novelaiSize(payload.size);
-  const sampler = medium ? 'k_euler_ancestral' : String(payload.sampler ?? raw.sampler ?? 'k_euler_ancestral');
-  const qualityToggle = Boolean(nai.qualityToggle ?? raw.qualityToggle ?? true);
+  const { sampler } = shape;
+  const qualityToggle = toFlag(nai.qualityToggle ?? raw.qualityToggle, true);
   const uc = ucPresetName(family, medium ? 'heavy' : raw.ucPresetId ?? nai.ucPreset ?? raw.ucPreset);
-  const seed = toNumber(payload.seed);
 
   let input = payload.prompt;
   let negative = payload.negative_prompt ?? '';
@@ -173,47 +215,49 @@ export function novelaiRequest(payload) {
   const parameters = {
     ...pickRaw(raw),
     params_version: family === 'v5' ? 4 : 3,
-    width,
-    height,
+    width: shape.width,
+    height: shape.height,
     scale: toNumber(payload.scale) ?? toNumber(raw.scale) ?? 5,
     sampler,
-    steps: medium ? 14 : clamp(Math.trunc(toNumber(payload.steps) ?? toNumber(raw.steps) ?? 28), 1, 50),
-    n_samples: clamp(Math.trunc(toNumber(payload.n) ?? 1), 1, 4),
-    seed: Number.isInteger(seed) && seed >= 0 && seed <= MAX_SEED ? seed : Math.floor(Math.random() * MAX_SEED),
+    steps: shape.steps,
+    n_samples: shape.n,
+    seed: shape.seed,
     ucPreset: Object.keys(FAMILIES[family].uc).indexOf(uc),
     qualityToggle,
     negative_prompt: negative,
     cfg_rescale: toNumber(nai.cfg_rescale) ?? toNumber(raw.cfg_rescale) ?? 0,
-    dynamic_thresholding: Boolean(raw.dynamic_thresholding),
+    dynamic_thresholding: toFlag(raw.dynamic_thresholding),
     legacy: false,
     legacy_v3_extend: false,
     deliberate_euler_ancestral_bug: false,
     prefer_brownian: true,
   };
-  const schedule = payload.noise_schedule ?? raw.noise_schedule ?? 'karras';
+  const schedule = toText(payload.noise_schedule, toText(raw.noise_schedule, 'karras'));
   if (NO_SCHEDULE.has(sampler)) delete parameters.noise_schedule;
   else parameters.noise_schedule = isV4Plus(family) && schedule === 'native' ? 'karras' : schedule;
 
   if (isV4Plus(family)) {
     // 多角色时客户端会带 char_captions，原样保留，只换掉主提示词
+    const prompt = plainObject(raw.v4_prompt);
+    const negativePrompt = plainObject(raw.v4_negative_prompt);
     parameters.v4_prompt = {
       use_coords: false,
       use_order: true,
-      ...raw.v4_prompt,
-      caption: { char_captions: [], ...raw.v4_prompt?.caption, base_caption: input },
+      ...prompt,
+      caption: { char_captions: [], ...plainObject(prompt.caption), base_caption: input },
     };
     parameters.v4_negative_prompt = {
       legacy_uc: Boolean(FAMILIES[family].legacyUc),
-      ...raw.v4_negative_prompt,
-      caption: { char_captions: [], ...raw.v4_negative_prompt?.caption, base_caption: negative },
+      ...negativePrompt,
+      caption: { char_captions: [], ...plainObject(negativePrompt.caption), base_caption: negative },
     };
     parameters.characterPrompts ??= [];
     parameters.use_coords = Boolean(parameters.v4_prompt.use_coords);
     delete parameters.sm;
     delete parameters.sm_dyn;
   } else {
-    parameters.sm = Boolean(nai.sm ?? raw.sm);
-    parameters.sm_dyn = parameters.sm && Boolean(nai.sm_dyn ?? raw.sm_dyn);
+    parameters.sm = shape.sm;
+    parameters.sm_dyn = shape.sm_dyn;
   }
   if (family === 'v5') {
     // 网页端 V5 用名字指定预设，并且总带上 skip_cfg_above_sigma: null
@@ -267,13 +311,21 @@ function isImage(data) {
 
 const TIERS = ['Paper（免费）', 'Tablet', 'Scroll', 'Opus'];
 
-/** /user/subscription 的响应 → 后台显示用的套餐和 Anlas 余额 */
+/**
+ * /user/subscription 的响应 → 套餐、Anlas 余额和 Opus 用量条。level 3 = Opus；
+ * usage 只有 Opus 有：percent 是 NAI5 免费额度还剩多少，usage_negative 为真时 NAI5 每张都收 Anlas
+ */
 export function novelaiAccount(body) {
   const steps = body?.trainingStepsLeft ?? {};
+  const usage = body?.usage ?? null;
   return {
+    level: Number(body?.tier) || 0,
     tier: TIERS[body?.tier] ?? `tier ${body?.tier}`,
     active: Boolean(body?.active),
     anlas: (Number(steps.fixedTrainingStepsLeft) || 0) + (Number(steps.purchasedTrainingSteps) || 0),
+    usage_negative: usage?.isNegative === true,
+    usage_percent: Number.isFinite(usage?.percent) ? usage.percent : null,
+    extra_percent: Number.isFinite(usage?.purchasedPercent) ? usage.purchasedPercent : null,
     expires_at: body?.expiresAt ? body.expiresAt * 1000 : null,
   };
 }
