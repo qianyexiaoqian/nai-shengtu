@@ -261,14 +261,16 @@ test('Accept: application/json 时按官方文档回 { images }；也认 multipa
   assert.equal(multipart.headers.get('content-type'), 'application/zip');
 });
 
-test('官方格式的错误：{ statusCode, message }；只做文生图', async () => {
+test('官方格式的错误：{ statusCode, message }；局部重绘、Vibe 不支持（图生图见 img2img.test.js）', async () => {
   const noKey = await realFetch(`${BASE}/ai/generate-image`, { method: 'POST', body: '{}' });
   assert.equal(noKey.status, 401);
   assert.equal((await noKey.json()).statusCode, 401);
 
-  const img2img = await naiRequest({ ...CLIENT_BODY, action: 'img2img' });
-  assert.equal(img2img.status, 400);
-  assert.match((await img2img.json()).message, /只能文生图/);
+  const infill = await naiRequest({ ...CLIENT_BODY, action: 'infill' });
+  assert.equal(infill.status, 400);
+  assert.match((await infill.json()).message, /只能文生图（generate）和图生图（img2img）/);
+  const noImage = await naiRequest({ ...CLIENT_BODY, action: 'img2img' });
+  assert.deepEqual([noImage.status, (await noImage.json()).message], [400, '图生图要带参考图（parameters.image）']);
 
   const vibe = await naiRequest({ ...CLIENT_BODY, parameters: { ...CLIENT_BODY.parameters, reference_image_multiple: ['abc'] } });
   assert.equal(vibe.status, 400);

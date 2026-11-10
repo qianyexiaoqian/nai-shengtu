@@ -124,6 +124,8 @@ if (!logColumns.has('queue_ms')) db.exec('ALTER TABLE logs ADD COLUMN queue_ms I
 if (!logColumns.has('adjusted')) db.exec('ALTER TABLE logs ADD COLUMN adjusted TEXT');
 // 官方秘钥出的图按官网计价估算花了多少 Anlas（Opus 免费的记 0）；OpenAI 兼容的上游为空
 if (!logColumns.has('anlas')) db.exec('ALTER TABLE logs ADD COLUMN anlas INTEGER');
+// 图生图的重绘强度；文生图为空
+if (!logColumns.has('img2img')) db.exec('ALTER TABLE logs ADD COLUMN img2img REAL');
 
 // 调用密钥能不能用 AI 提示词优化：0 = 不能（写 --ai 也不行），1 = 按后台的 AI 设置走
 const keyColumns = new Set(db.prepare('PRAGMA table_info(api_keys)').all().map((c) => c.name));

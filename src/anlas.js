@@ -5,7 +5,8 @@ import { novelaiFamily } from './novelai.js';
 // NAI5 medium 不看步数，按 23 步算再除以 1.75、不取整。
 // Opus 订阅在 ≤1024×1024、≤28 步时，一次请求里的第一张免费，其余照收；
 // NAI5 的免费要扣 Opus 用量条，用量条为负（usage.isNegative）时 NAI5 每张都收 Anlas。
-// 只算文生图：中继不转图生图、Vibe、角色参考，这些另外收费的情况不在这里。
+// 图生图每张再乘重绘强度。官方文档说 Opus 的免费出图不含“用别的图当底图”（网页端的计价函数没把它排除，没实测），
+// 这里按要收费算，“只出免费图”的秘钥不接图生图。Vibe、角色参考中继不转，不在这里。
 const A = 2951823174884865e-21;
 const B = 5753298233447344e-22;
 const FREE_PIXELS = 1024 * 1024;
@@ -18,13 +19,14 @@ const MAX_PER_IMAGE = 140; // 网页端单张超过这个价就不让发
  * why 是要花 Anlas 的原因（给日志和后台看）；accountReason 是账号这边的原因（不是 Opus、用量条用完、状态未知），
  * requestReasons 是请求这边的（尺寸、步数、张数超出免费范围）；barOnly 表示只是因为 NAI5 用量条用完了才收费。
  */
-export function anlasCost(model, { width, height, steps, n = 1, sm = false, sm_dyn: dyn = false }, account, now = Date.now()) {
+export function anlasCost(model, shape, account, now = Date.now()) {
+  const { width, height, steps, n = 1, sm = false, sm_dyn: dyn = false, img2img = false, strength = 1 } = shape;
   const pixels = width * height;
   const v5 = novelaiFamily(model) === 'v5';
   let price = /-medium/.test(model) ? (A * pixels + B * pixels * 23) / 1.75 : Math.ceil(A * pixels + B * pixels * steps);
   price *= sm && dyn ? 1.4 : sm ? 1.2 : 1;
   if (v5) price *= 1.5;
-  const perImage = Math.max(Math.ceil(price), 2);
+  const perImage = Math.max(Math.ceil(price * (img2img ? strength : 1)), 2);
 
   const active = account?.active && !(account.expires_at && account.expires_at <= now);
   let accountReason = null;
@@ -34,6 +36,7 @@ export function anlasCost(model, { width, height, steps, n = 1, sm = false, sm_d
   const requestReasons = [];
   if (pixels > FREE_PIXELS) requestReasons.push(`尺寸 ${width}x${height} 超过 1024×1024`);
   if (steps > FREE_STEPS) requestReasons.push(`步数 ${steps} 超过 28`);
+  if (img2img) requestReasons.push('图生图不在 Opus 的免费范围内');
   const firstFree = !accountReason && !requestReasons.length;
   if (n > 1) requestReasons.push(firstFree ? `一次 ${n} 张，第 2 张起收费` : `一次 ${n} 张`);
   const total = perImage * (n - (firstFree ? 1 : 0));

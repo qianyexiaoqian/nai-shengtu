@@ -3,9 +3,12 @@ import { anlasCost } from './anlas.js';
 import { config } from './config.js';
 import { db } from './db.js';
 import { HttpError } from './http.js';
+import { ImageError } from './imageCodec.js';
 import { applyLimits } from './limits.js';
 import { barUsedSince, markBarUsed, needsFreshBar, noteAccountUsed, refreshAccount } from './naiAccounts.js';
-import { NOVELAI_MODELS, novelaiBody, novelaiImages, novelaiRequest, novelaiShape } from './novelai.js';
+import {
+  NOVELAI_MODELS, imageReady, novelaiBody, novelaiImageParts, novelaiImages, novelaiRequest, novelaiShape, prepareImage,
+} from './novelai.js';
 import { acquireKey, createJob, releaseKey } from './queue.js';
 import { getSettings } from './settings.js';
 import {
@@ -33,6 +36,7 @@ const UNAVAILABLE = '生图失败：服务暂时不可用，请联系管理员';
 export async function generateImages(payload, { signal, info } = {}) {
   const unservable = servableError(payload);
   if (unservable) throw unservable;
+  if (payload.img2img) await prepareReference(payload, signal);
   const job = createJob(payload.model, {
     signal,
     accepts: (key) => planFor(key, payload).ok,
@@ -61,6 +65,16 @@ export async function generateImages(payload, { signal, info } = {}) {
       job.tried.delete(key.id);
       continue;
     }
+    if (payload.img2img && !imageReady(payload, plan.shape)) {
+      // 这把秘钥的出图上限让尺寸和预先缩放的不一样：先把秘钥放回去，缩放好了再重新排，不占着它等
+      releaseKey(job);
+      job.tried.delete(key.id);
+      await referencePng(payload, plan.shape, signal).catch((err) => {
+        err.queueMs = job.queueMs;
+        throw err;
+      });
+      continue;
+    }
     Object.assign(job.info, { size: plan.applied.size, n: plan.applied.n, anlas: plan.applied.anlas, adjusted: plan.applied.changes });
     try {
       const body = key.type === 'novelai'
@@ -87,18 +101,42 @@ export async function generateImages(payload, { signal, info } = {}) {
 
 /**
  * 现在有没有上游秘钥能接这个请求，没有就给出该报的错：没有能接这个模型的秘钥 → 未配置；
- * 有，但都是官方秘钥、压完上限还是单张超过 140 Anlas → 参数太大；都是“只出免费图”、只是请求超出免费范围 → 400；
+ * 有，但都是官方秘钥、压完上限还是单张超过 140 Anlas → 参数太大；图生图只有 OpenAI 兼容的秘钥能接 → 不支持、
+ * 只有“只出免费图”的官方秘钥 → 400；都是“只出免费图”、只是请求超出免费范围 → 400；
  * 账号那边的原因（用量条用完、不是 Opus、状态未知）→ 免费额度用不了。
  */
 export function servableError(payload) {
   const plans = candidateKeys(payload.model).map((key) => ({ key, plan: planFor(key, payload) }));
   if (!plans.length) return notConfiguredError(payload.model);
   if (plans.some(({ plan }) => plan.ok)) return null;
+  // 图生图只有 NovelAI 格式的上游（官方或兼容它的中转站）能出；OpenAI 兼容的接口没有图生图
+  const capable = plans.filter(({ plan }) => !plan.unsupported);
+  if (!capable.length) {
+    return new HttpError(400, '当前没有支持图生图的上游，请联系管理员', {
+      code: 'img2img_unsupported',
+      internal: `图生图要 NovelAI 格式的上游秘钥（类型选 NovelAI 官方），能接模型 ${payload.model} 的都是 OpenAI 兼容的`,
+    });
+  }
+  plans.splice(0, plans.length, ...capable);
   const reasons = plans.map(({ key, plan }) => `${key.name || `#${key.id}`}：${plan.anlas.why}，要 ${plan.anlas.total} Anlas`);
   if (plans.every(({ plan }) => plan.anlas.refused)) {
     return new HttpError(400, '尺寸或步数太大了，请调小一些再试', {
       code: 'too_expensive',
       internal: `单张超过 140 Anlas（官网也不让这么出）：${reasons.join('；')}`,
+    });
+  }
+  if (payload.img2img) {
+    // 图生图每张都要花 Anlas：不是“只出免费图”的秘钥接不了，只能是单张太贵（调小能出）；
+    // 剩下的就是开着“只出免费图”的秘钥（账号状态怎样都一样）
+    if (plans.some(({ key, plan }) => !key.free_only && plan.anlas.refused)) {
+      return new HttpError(400, '尺寸或步数太大了，请调小一些再试', {
+        code: 'too_expensive',
+        internal: `单张超过 140 Anlas（官网也不让这么出）：${reasons.join('；')}`,
+      });
+    }
+    return new HttpError(400, '图生图要花 Anlas，当前的上游只出免费图，暂时不能图生图', {
+      code: 'img2img_not_free',
+      internal: `能接图生图的官方秘钥都开着“只出免费图”：${reasons.join('；')}`,
     });
   }
   if (plans.every(({ plan }) => plan.anlas.refused || !plan.anlas.accountReason)) {
@@ -113,6 +151,29 @@ export function servableError(payload) {
     code: 'free_quota_exhausted',
     internal: `只出免费图的官方秘钥这次都要花 Anlas，没有发出去：${reasons.join('；')}`,
   });
+}
+
+/**
+ * 图生图：按头一把接得了的秘钥的出图尺寸，先在图片线程里把参考图缩放好（解不开的图在这里报 400），
+ * 排队、调 AI 优化之前就做完，轮到秘钥时不用占着它等。同一个请求再调用不会重做。
+ */
+export async function prepareReference(payload, signal) {
+  const first = candidateKeys(payload.model).map((key) => planFor(key, payload)).find((plan) => plan.ok);
+  if (first) await referencePng(payload, first.shape, signal);
+}
+
+// 参考图缩放失败是这张图的问题、不是秘钥的：按 400 报，不换秘钥；图片线程忙不过来 503；调用方断开 499
+async function referencePng(payload, shape, signal) {
+  try {
+    return await prepareImage(payload, shape, signal);
+  } catch (err) {
+    if (err instanceof ImageError) throw new HttpError(400, err.message, { param: 'image', code: 'invalid_image', internal: err.cause && String(err.cause) });
+    if (err.code === 'image_busy') {
+      throw new HttpError(503, '参考图处理排队的太多了，请稍后再试', { type: 'server_error', code: 'image_busy' });
+    }
+    if (err.code === 'aborted') throw new HttpError(499, '调用方已断开，取消处理参考图', { code: 'client_closed' });
+    throw err;
+  }
 }
 
 /**
@@ -156,6 +217,8 @@ function planFor(key, payload) {
     };
   }
   const [width, height] = (/^(\d+)x(\d+)$/.exec(payload.size ?? '') ?? [0, 1024, 1024]).slice(1).map(Number);
+  // OpenAI 兼容的上游不能图生图，不接（servableError 给出原因）
+  if (payload.img2img) return { payload, ok: false, unsupported: true, applied: { size: `${width}x${height}`, n: payload.n ?? 1, changes: [] } };
   const wanted = { width, height, steps: payload.steps, n: payload.n ?? 1 };
   const { shape, changes } = applyLimits(wanted, key);
   const sent = { ...payload };
@@ -169,7 +232,7 @@ function planFor(key, payload) {
  * 优先要链接：图片留在上游，中继不用存文件（有的 NAI 中转站不管写什么都只给链接）。
  * 有的上游不认 response_format（比如 gpt-image 系列只给 b64_json），报这个参数错时去掉再请求一次，参数错误不会出图扣点。
  */
-async function requestGeneration(key, { nai: _nai, ...payload }) {
+async function requestGeneration(key, { nai: _nai, img2img: _img2img, ...payload }) {
   let res = await postGeneration(key, { ...payload, response_format: 'url' });
   let body = await res.json().catch(() => null);
   if (res.status === 400 && /response_format/i.test(JSON.stringify(body?.error ?? body?.detail ?? ''))) {
@@ -184,7 +247,8 @@ async function requestGeneration(key, { nai: _nai, ...payload }) {
 
 /** NovelAI 官方：按 shape（已按秘钥上限压过）转成官方请求，图片从 ZIP 里取出来，按 OpenAI 格式的 b64_json 返回 */
 async function requestNovelai(key, payload, shape) {
-  const { body, headers } = novelaiBody(novelaiRequest(payload, shape));
+  const request = novelaiRequest(payload, shape);
+  const { body, headers } = novelaiBody(request, await novelaiImageParts(request, payload, shape));
   let res;
   try {
     res = await fetch(`${key.base_url}/ai/generate-image`, {

@@ -1,3 +1,5 @@
+import { createHmac, randomBytes } from 'node:crypto';
+import { coverPng } from './imageJobs.js';
 import { readZip } from './zip.js';
 
 // NovelAI 官方接口：上游类型选“NovelAI 官方”的秘钥（官网 Account Settings 里生成的 pst- 持久令牌）走这里。
@@ -172,7 +174,8 @@ export function novelaiShape(payload) {
     dyn ||= sampler === 'nai_smea_dyn';
     sampler = 'k_euler_ancestral';
   }
-  if (isV4Plus(novelaiFamily(payload.model)) || /^ddim/.test(sampler)) sm = false;
+  // 图生图不开 SMEA（网页端也是）
+  if (isV4Plus(novelaiFamily(payload.model)) || /^ddim/.test(sampler) || payload.img2img) sm = false;
   const seed = toNumber(payload.seed);
   return {
     width,
@@ -183,6 +186,8 @@ export function novelaiShape(payload) {
     sm,
     sm_dyn: sm && dyn,
     seed: Number.isInteger(seed) && seed >= 0 && seed <= MAX_SEED ? seed : Math.floor(Math.random() * MAX_SEED),
+    img2img: Boolean(payload.img2img),
+    strength: payload.img2img?.strength ?? 1,
   };
 }
 
@@ -265,10 +270,63 @@ export function novelaiRequest(payload, shape = novelaiShape(payload)) {
     parameters.qualityPresetId = qualityToggle ? 'standard' : 'none';
     parameters.skip_cfg_above_sigma = null;
   }
+  if (payload.img2img) {
+    // 图生图：参考图由 novelaiImageParts 按出图尺寸缩放后放进去；extra_noise_seed 和网页端一样跟种子走，color_correct 默认开
+    Object.assign(parameters, {
+      strength: payload.img2img.strength,
+      noise: payload.img2img.noise,
+      extra_noise_seed: shape.seed,
+      color_correct: toFlag(raw.color_correct, true),
+    });
+    return { input, model, action: 'img2img', parameters };
+  }
   return { input, model, action: 'generate', parameters };
 }
 
-// NovelAI 格式进来的请求里，这些参数原样带给上游；图片类字段（图生图、Vibe、角色参考）在入口就拦掉了
+// 网页端给 multipart 里的每张图带一个缓存键（HMAC），这里照做；图每次都真的传，不依赖服务端缓存
+const CACHE_SECRET = randomBytes(32);
+
+/**
+ * 把图生图的参考图放进请求：等比居中裁切缩放到出图尺寸（官方要求和 width/height 一样大）的 PNG，见 prepareImage。
+ * V5（multipart）放成单独的一部分，parameters.image 写部分的名字；之前的模型直接放 base64。返回要附带的部分。
+ */
+export async function novelaiImageParts(request, payload, shape) {
+  if (!payload.img2img) return [];
+  const png = await prepareImage(payload, shape);
+  const b64 = png.toString('base64');
+  if (request.parameters.params_version < 4) {
+    request.parameters.image = b64;
+    return [];
+  }
+  request.parameters.image = 'image';
+  request.parameters.image_cache_secret_key = createHmac('sha256', CACHE_SECRET).update(b64).digest('hex');
+  return [['image', png]];
+}
+
+/**
+ * 图生图的参考图按 shape 的出图尺寸缩放成 PNG（在图片线程里做，见 imageJobs.js 的 coverPng，出错也照它抛）。
+ * 同一个请求同一个尺寸只做一次，换秘钥重试时直接用。
+ */
+export function prepareImage(payload, { width, height }, signal) {
+  const img2img = payload.img2img;
+  const size = `${width}x${height}`;
+  img2img.png ??= new Map();
+  let entry = img2img.png.get(size);
+  if (!entry) {
+    entry = { ready: false };
+    entry.promise = coverPng(img2img.image.bytes, width, height, signal).then((png) => {
+      entry.ready = true;
+      return png;
+    });
+    img2img.png.set(size, entry);
+  }
+  return entry.promise;
+}
+
+/** 这个出图尺寸的参考图缩放好了没有 */
+export const imageReady = (payload, { width, height }) => Boolean(payload.img2img.png?.get(`${width}x${height}`)?.ready);
+
+// NovelAI 格式进来的请求里，这些参数原样带给上游；图生图的参考图由中继缩放后另放，Vibe、角色参考在入口就拦掉了
 const RAW_FIELDS = [
   'characterPrompts', 'use_coords', 'legacy_uc', 'controlnet_strength', 'add_original_image', 'skip_cfg_above_sigma',
   'image_format', 'straight_alpha', 'tag_hint_qt', 'tag_hint_uc_preset', 'tag_hint_transparent_background',
@@ -285,10 +343,12 @@ function pickRaw(raw) {
  * 请求体：V5（params_version 4）照网页端用 multipart，JSON 放在名为 request 的部分；之前的模型直接发 JSON。
  * 返回 fetch 用的 { body, headers }
  */
-export function novelaiBody(request) {
+export function novelaiBody(request, parts = []) {
   const json = JSON.stringify(request);
   if (request.parameters.params_version < 4) return { body: json, headers: { 'Content-Type': 'application/json' } };
+  // 和网页端一样：图片部分在前，JSON 在最后
   const form = new FormData();
+  for (const [name, data] of parts) form.append(name, new Blob([data], { type: 'image/png' }), 'blob');
   form.append('request', new Blob([json], { type: 'application/json' }), 'blob');
   return { body: form, headers: {} };
 }

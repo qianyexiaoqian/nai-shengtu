@@ -6,7 +6,7 @@ import { handleChat } from './src/chat.js';
 import { config } from './src/config.js';
 import { CORS_HEADERS, HttpError, clientIp, closeSignal, readJson, requestBaseUrl, sendError, sendJson } from './src/http.js';
 import { handleImageProxy, purgeExpiredImages } from './src/imageStore.js';
-import { handleImages } from './src/images.js';
+import { handleImageEdits, handleImages } from './src/images.js';
 import { authenticate } from './src/keys.js';
 import { handleModels, seedModels } from './src/models.js';
 import { handleNaiGenerate, handleNaiSubscription } from './src/naiApi.js';
@@ -27,6 +27,8 @@ const routes = {
   'GET /models': (req, res) => handleModels(res),
   'POST /chat/completions': withKeyAndBody(handleChat),
   'POST /images/generations': withKeyAndBody(handleImages),
+  // 图生图：OpenAI 的图片编辑接口（multipart 或 JSON，自己鉴权）
+  'POST /images/edits': handleImageEdits,
   // NovelAI 官方格式，给只会调 NovelAI 的客户端用（自己鉴权，错误也按官方格式回）
   'POST /ai/generate-image': handleNaiGenerate,
   'GET /user/subscription': handleNaiSubscription,

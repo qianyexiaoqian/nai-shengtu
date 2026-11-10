@@ -762,6 +762,9 @@ async function fillKeySelect() {
 }
 
 const ENDPOINTS = { chat: '聊天', images: '图片', novelai: 'NovelAI' };
+// 图生图的请求在提示词前标出来，带重绘强度
+const img2imgBadge = (strength) =>
+  strength == null ? '' : `<span class="badge accent" title="图生图，重绘强度 ${esc(strength)}">图生图 ${esc(strength)}</span> `;
 
 async function loadLogsPage() {
   const params = new URLSearchParams({ page: state.logsPage, page_size: 20 });
@@ -787,7 +790,7 @@ async function loadLogsPage() {
       fmtNum(l.points) + (l.anlas == null ? '' : `<br><span class="muted">${l.anlas ? `Anlas ${fmtNum(l.anlas)}` : 'Anlas 免费'}</span>`),
       `${(Number(l.duration_ms || 0) / 1000).toFixed(1)}s` +
         (l.queue_ms >= 1000 ? `<br><span class="muted">排队 ${(l.queue_ms / 1000).toFixed(0)}s</span>` : ''),
-      `<span title="${esc(l.prompt)}">${esc(String(l.prompt ?? '').slice(0, 80))}</span>` +
+      img2imgBadge(l.img2img) + `<span title="${esc(l.prompt)}">${esc(String(l.prompt ?? '').slice(0, 80))}</span>` +
         (l.final_prompt ? `<br><span class="muted" title="${esc(l.final_prompt)}">→ ${esc(l.final_prompt.slice(0, 120))}</span>` : '') +
         (l.ai_model ? `<br><span class="badge accent">AI 优化</span> <span class="muted">${esc(l.ai_model)} · ${fmtNum(l.ai_input_tokens)} / ${fmtNum(l.ai_output_tokens)} tokens · ${fmtCost(l.ai_cost)}</span>` : '') +
         (l.error ? `<br><span class="err-text">${esc(l.error)}</span>` : ''),
@@ -1182,7 +1185,8 @@ const fmtSeconds = (ms) => {
   return s < 60 ? `${s} 秒` : `${Math.floor(s / 60)} 分 ${s % 60} 秒`;
 };
 const queueSize = (job) => `${esc(job.size)}${job.n > 1 ? ` × ${job.n}` : ''}`;
-const queuePrompt = (job) => `<span class="muted" title="${esc(job.prompt ?? '')}">${esc(String(job.prompt ?? '').slice(0, 60))}</span>`;
+const queuePrompt = (job) => img2imgBadge(job.img2img) +
+  `<span class="muted" title="${esc(job.prompt ?? '')}">${esc(String(job.prompt ?? '').slice(0, 60))}</span>`;
 let queueBusy = false;
 
 loaders.queue = async () => {

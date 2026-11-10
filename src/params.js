@@ -41,6 +41,9 @@ const FLAGS = {
   scale: ['scale', toFloat],
   seed: ['seed', toInt],
   sampler: ['sampler', (v) => v],
+  // 图生图：重绘强度（越大越不像原图）、加噪
+  strength: ['strength', toFloat],
+  noise: ['noise', toFloat],
 };
 
 /** 从提示词文本里拆出行内参数，返回干净的提示词和参数 */
@@ -87,6 +90,13 @@ export function aspectToSize(ratio) {
   return `${floor64(Math.sqrt((area * w) / h))}x${floor64(Math.sqrt((area * h) / w))}`;
 }
 
+/** 图生图没给尺寸时按参考图的比例出图：总像素约 1024×1024（不超过），宽高取 64 的倍数 */
+export function sizeForImage(width, height) {
+  const area = 1024 * 1024;
+  const floor64 = (v) => Math.max(64, Math.floor(v / 64) * 64);
+  return `${floor64(Math.sqrt((area * width) / height))}x${floor64(Math.sqrt((area * height) / width))}`;
+}
+
 /**
  * 合成上游 /images/generations 的请求体，upstreamModel 是已解析好的上游模型 ID。
  * 优先级：提示词行内参数 > 请求体字段；尺寸取 size，没有（或是 auto）时再看 aspect_ratio。
@@ -111,7 +121,8 @@ export function toUpstreamPayload(body, prompt, inline, upstreamModel) {
     aspectToSize(body.aspect_ratio ?? body.image_config?.aspect_ratio);
   if (size) payload.size = size;
 
-  const { size: _size, aspect_ratio: _ratio, ai: _ai, ...rest } = inline;
+  // 图生图的强度、加噪只给官方格式的上游用（见 generate.js），不转给 OpenAI 兼容上游
+  const { size: _size, aspect_ratio: _ratio, ai: _ai, strength: _strength, noise: _noise, ...rest } = inline;
   Object.assign(payload, rest);
   if (payload.n != null) payload.n = Math.min(4, Math.max(1, Math.trunc(Number(payload.n)) || 1));
   return payload;

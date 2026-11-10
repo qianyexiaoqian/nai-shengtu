@@ -9,9 +9,10 @@
 
 | 接口 | 用途 |
 | --- | --- |
-| `POST /v1/chat/completions` | 香蕉生图式的聊天生图：发一句提示词，assistant 回复里带 Markdown 图片，支持 `stream` |
-| `POST /v1/images/generations` | OpenAI Images 格式，补齐了 `b64_json` 等 |
-| `POST /ai/generate-image` | NovelAI 官方格式（`input` / `model` / `parameters`，返回 ZIP），给只会调 NovelAI 的客户端用 |
+| `POST /v1/chat/completions` | 香蕉生图式的聊天生图：发一句提示词，assistant 回复里带 Markdown 图片，支持 `stream`；消息里带图就是图生图 |
+| `POST /v1/images/generations` | OpenAI Images 格式，补齐了 `b64_json` 等；带 `image` 就是图生图 |
+| `POST /v1/images/edits` | OpenAI 图片编辑格式（multipart 传图，或 JSON），按图生图出 |
+| `POST /ai/generate-image` | NovelAI 官方格式（`input` / `model` / `parameters`，返回 ZIP），给只会调 NovelAI 的客户端用，文生图和图生图 |
 | `GET /user/subscription` | NovelAI 客户端连接时查的订阅信息 |
 | `GET /v1/models` | 后台已启用的模型 |
 | `GET /v1/img/<uuid>.png` | 返回给调用方的图片链接，由中继代拉上游图片（上游给 base64 的存在中继本地） |
@@ -96,7 +97,7 @@ server {
 
 ## 聊天生图 `/v1/chat/completions`
 
-取**最后一条 user 消息的文字**当提示词，system 消息、历史消息和图片附件都会忽略。
+取**最后一条 user 消息的文字**当提示词，system 消息和历史消息都会忽略；这条消息里带了图片的，第一张当参考图做图生图（见“图生图”）。
 
 ```bash
 curl http://127.0.0.1:3000/v1/chat/completions \
@@ -126,6 +127,7 @@ curl http://127.0.0.1:3000/v1/chat/completions \
 | `--no lowres, blurry` / `--neg ...` | 负面提示词，取到行尾或下一个 `--参数` 为止 |
 | `--steps 28` `--scale 5` `--seed 123` `--sampler k_euler` | NAI 扩展参数 |
 | `--n 2` | 张数，1～4（逐张扣费） |
+| `--strength 0.5` `--noise 0.1` | 图生图的重绘强度（0.01～0.99，默认 0.7）和加噪（0～0.99，默认 0） |
 | 单独一行 `Negative prompt: ...` / `负面：...` | 该行之后全部作为负面提示词 |
 
 不认识的 `--xxx` 会原样留在提示词里。请求体里的 `size`、`aspect_ratio`、`image_config.aspect_ratio`、`negative_prompt`、
@@ -275,13 +277,55 @@ python scripts/build_tag_data.py <DanbooruSearchOnline 目录> <Auto-NovelAI-Ref
 - `size: "auto"` 或缺省时，按 `aspect_ratio` 换算；也没有就用上游默认的 1024x1024。
 - `url` 是中继的 UUID 图片链接。
 - 提示词同样支持上面的行内参数。
+- 带了 `image`（data URI、base64 或图片链接；也认 `images: [{ "image_url": "..." }]`）就是图生图，见下面的“图生图”。
+  `/v1/images/edits` 也能用，参考图用 multipart 的 `image` / `image[]` 文件传。
+
+## 图生图
+
+四个出图接口都能图生图，参考图这样给：
+
+| 接口 | 参考图 |
+| --- | --- |
+| `/v1/chat/completions` | 最后一条 user 消息里的第一张图：OpenAI 的 `image_url`、Responses 的 `input_image`、Anthropic 的 `image`（base64 或 url） |
+| `/v1/images/generations` | 请求体的 `image`（数组取第一张），或者 `images: [{ "image_url": "..." }]` |
+| `/v1/images/edits` | OpenAI 的图片编辑接口：multipart 里的 `image` / `image[]` 文件，或者 JSON 里和上面一样的 `image` / `images` |
+| `/ai/generate-image` | 照官方：`action: "img2img"`，`parameters.image` 是 base64；网页端 V5 的 multipart 里图片单独一部分，`parameters.image` 写那一部分的名字 |
+
+```bash
+curl http://127.0.0.1:3000/v1/images/edits \
+  -H "Authorization: Bearer $RELAY_KEY" \
+  -F model=nai-diffusion-4-5-full -F 'prompt=1girl, watercolor' -F strength=0.5 \
+  -F image=@photo.jpg
+```
+
+- 参考图支持 PNG、JPEG（包括渐进式 JPEG，手机照片按 EXIF 方向转正），最大 15 MB、2400 万像素；WebP、GIF 请先转成 PNG 或 JPEG。
+  可以给 data URI、裸 base64 或图片链接；中继自己出的图的链接（`/v1/img/<uuid>.png`）直接从库里取，可以拿上一张接着改。
+- 链接由中继去下载（20 秒超时、最多跳转 3 次，调用方断开就不下了）。解析出来是本机、内网、链路本地（包括云服务器的元数据地址
+  `169.254.169.254`）的一律不连，IPv6 里内嵌这些地址的写法（映射地址、NAT64、6to4）也拦；连接时才检查，换 DNS 也绕不过去，防止有人借中继探内网。
+- `strength` 是重绘强度（0.01～0.99，默认 0.7，越大和原图差得越多），`noise` 是加噪（0～0.99，默认 0）。写在请求体顶层，
+  或者提示词里的 `--strength 0.5` / `--noise 0.1`；NovelAI 格式写在 `parameters` 里。和官网一样，图生图不开 SMEA。
+- 出图尺寸：写了就用写的（`size`、`--ar`、`--size`、NovelAI 格式的 `width` / `height`），没写按参考图的比例出约 1024×1024 的（比如 2:3 的图出 832x1216）。
+  官方要求参考图和出图一样大，中继把参考图**等比缩放、居中裁掉多出来的部分**，比例不一样时边上会被裁掉一些。出图上限压了尺寸的按压完的尺寸缩放。
+- **只有 NovelAI 格式的上游能出**：类型是“NovelAI 官方”的秘钥（官方的 `pst-` 令牌，或者兼容官方接口的反代、中转站）。
+  OpenAI 兼容上游的 `/images/generations` 没有图生图，图生图请求不会发给它们；一把能接的都没有时返回 400 `img2img_unsupported`。
+- **图生图要花 Anlas**，不在 Opus 的免费范围里：大约是同尺寸文生图的价格乘重绘强度，每张至少 2。所以开着“只出免费图”的官方秘钥不接图生图，
+  能接的秘钥都开着它时返回 400 `img2img_not_free`。要用官方秘钥图生图，在它的“出图上限”里关掉“只出免费图”（面积、步数、张数上限照样管着）。
+- 开着“回复里附提示词”时，聊天回复多一行 `> 图生图：参考图 1200x1800 → 832x1216，重绘强度 0.7`；
+  后台的调用日志和排队列表里，图生图请求的提示词前面标着“图生图 0.7”（重绘强度）。
+- 不支持：局部重绘（`mask`、NovelAI 的 `infill`）、Vibe Transfer、角色参考、ControlNet，这类请求返回 400。
+- 处理顺序：先查调用密钥的额度、有没有上游接得了，再读参考图（只看文件头），然后在单独的图片线程里解码、缩放
+  （1200 万像素的照片大约 1 秒，不会卡住别的请求），都好了才调 AI 优化、排队等上游秘钥——缩放时不占着秘钥。
+  文件头没问题但数据坏了的图在缩放时报 400 `invalid_image`，调用日志里记一条失败。
+- 图片线程最多 3 个（按 CPU 核数），每个一次处理一张；排队超过 32 张返回 503 `image_busy`，调用方断开了还没开始处理的直接去掉，
+  单张处理超过 30 秒算失败。解压炸弹、故意拖慢解码的畸形 JPEG 会很快被拒掉。同一个请求换秘钥重试时不重复缩放。
 
 ## NovelAI 官方格式 `/ai/generate-image`
 
 给只会调 NovelAI 官方接口、但能改接口地址的客户端（各种 NAI 插件、脚本、SDK）用：接口地址填中继的根地址
 `http://<服务器IP>:3000`（`/v1/ai/generate-image` 也认），API Key / Token 填中继的调用 sk（`Authorization: Bearer sk-...`）。
 
-- 请求体和官方一样：`{ input, model, action: "generate", parameters: {...} }`，也认官方网页端 V5 用的 multipart（JSON 放在 `request` 部分）。
+- 请求体和官方一样：`{ input, model, action, parameters: {...} }`，`action` 支持 `generate`（文生图）和 `img2img`（图生图，见上面的“图生图”）；
+  也认官方网页端 V5 用的 multipart（JSON 放在 `request` 部分，图片各占一部分）。
 - 默认返回 ZIP（`image_0.png`、`image_1.png` …），和官方一样；请求头 `Accept` 只写 `application/json` 时，
   按官方文档返回 `{ "images": [{ "image": "<base64>", "index": 0, "seed": 123 }] }`。
 - 错误也是官方的样子 `{ "statusCode": 400, "message": "..." }`；调用 sk 额度用完返回 402（对应官方的 Anlas 不足）。
@@ -290,7 +334,7 @@ python scripts/build_tag_data.py <DanbooruSearchOnline 目录> <Auto-NovelAI-Ref
   `cfg_rescale`、`noise_schedule`、`ucPreset` 等原样带给 NovelAI 官方上游。上游是 OpenAI 兼容的时，只转提示词、负面、尺寸、张数、步数、
   引导、采样器、种子这些通用参数。
 - 模型映射、中文转标签、AI 优化、调用额度、记账和多上游轮询都和另外两个接口一样，后台日志里接口记为“NovelAI”。
-- 只做文生图：`action` 是 `img2img` / `infill`，或带了 `image`、`mask`、Vibe（`reference_image_multiple`）、角色参考
+- 局部重绘和参考类的功能不转：`action` 是 `infill`，或带了 `mask`、Vibe（`reference_image_multiple`）、角色参考
   （`director_reference_images`）的请求返回 400。
 
 ```bash
@@ -340,6 +384,7 @@ curl http://127.0.0.1:3000/ai/generate-image \
     从 NovelAI 格式接口进来的请求客户端已经拼好，原样发。
   - 官方不让同一个账号同时生成多张（并发会 429），官方令牌的“并发”默认 1，超出的请求在号池里排队（见下面的“并发和排队”）。
   - 默认按“Opus 免费档”出图、并且“只出免费图”，不会花 Anlas，见下面的“出图上限和只出免费图”。
+  - 图生图只有这种上游能出，参考图由中继缩放好放进请求（见“图生图”）。
   - “拉取模型”列出内置的官方模型，同时查这把令牌的套餐、Anlas 余额和 Opus 用量条（`地址/user/subscription`），也顺便验证令牌能不能用。
   - 官方返回的 401（令牌失效）、402（Anlas 不足 / 没订阅）、429（同一账号在别处正在出图）按下面的“失败切换”处理。
   - 注意 NovelAI 的服务条款：生图请求必须由人发起，不能自动化刷请求；账号共享给别人用也可能违反条款，自己斟酌。
@@ -383,6 +428,7 @@ curl http://127.0.0.1:3000/ai/generate-image \
     从没查到过、超过 30 分钟没查成功、或者**最近一次查询失败**，就当不知道，开着它的秘钥不接请求（宁可不出图也不花 Anlas）。
     自建反代没有这个接口的话，要么关掉“只出免费图”，要么反代把它也转过去；列表的“状态”里会写查询失败的原因。
   - 要用官方秘钥出要花 Anlas 的图，关掉它就行；单张超过 140 Anlas 的（官网网页端也不让这么出）无论开没开都不发，返回 400。
+  - 图生图每张都要花 Anlas，开着它的秘钥不接图生图（见“图生图”）。
 - 已经开始排队的请求，轮到时按当时的账号状态再算一次，不接就继续等别的秘钥。
 - 免费额度用完、参数太大这类错误在调 AI 提示词优化**之前**就返回，不白花 AI 的钱，流式聊天也会按正常 HTTP 状态码报错。
 - 调用密钥的额度按**实际会出的张数**算：官方秘钥一次只出 1 张的话，要 4 张也只占 1 张额度；正在出图、排队中的也算进去，
@@ -468,7 +514,7 @@ NAI5 乘 1.5，Opus 账号在 1024×1024、28 步以内时一次请求的第一�
 ## 注意
 
 - 每次 chat 请求都会真实生图扣点。部分客户端会用同一个模型自动“生成话题标题”，这也会触发生图，建议在客户端里把标题生成换成别的模型或关掉。
-- 只做文生图：图生图、局部重绘、Vibe、角色参考都不转，聊天消息里的图片会被忽略，NovelAI 格式接口带图片的请求返回 400。
+- 图生图只有 NovelAI 格式的上游能出，而且要花 Anlas（见“图生图”）；局部重绘、Vibe、角色参考都不转，返回 400。
 - 超时（默认 300 秒）后可能已经生成并扣点，先看后台调用日志，避免重复提交。
 - 后台登录状态只存在内存里，中继重启后需要重新登录。
 

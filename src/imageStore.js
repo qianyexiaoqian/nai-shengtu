@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { createReadStream, mkdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createReadStream, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Readable } from 'node:stream';
@@ -42,6 +42,15 @@ export const publicImageUrl = ({ id, ext }, baseUrl) => `${baseUrl}/v1/img/${id}
 
 /** 要 base64 的地方（聊天内嵌图片、images 接口的 b64_json）：上游给的是链接就下载下来 */
 export const imageBase64 = (image) => (image.b64 ? { mime: image.mime, b64: image.b64 } : fetchImageBase64(image.url));
+
+/** 中继存的图（/v1/img/<uuid>）的原始字节，拿来做图生图的参考图：本地文件直接读，上游链接去拉；没有或过期返回 null */
+export async function storedImageBytes(id) {
+  const row = db.prepare('SELECT upstream_url, file, expires_at FROM images WHERE id = ?').get(String(id).toLowerCase());
+  if (!row || row.expires_at < Date.now()) return null;
+  if (row.file) return readFileSync(join(IMAGE_DIR, row.file));
+  const { b64 } = await fetchImageBase64(row.upstream_url);
+  return Buffer.from(b64, 'base64');
+}
 
 export function purgeExpiredImages() {
   const now = Date.now();
