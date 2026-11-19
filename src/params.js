@@ -17,7 +17,7 @@ const ASPECT_SIZES = {
 // 原样转发给 OpenAI 兼容上游的字段（含一些 NAI 中转站的扩展字段）；prompt / model / size / negative 单独处理
 const UPSTREAM_FIELDS = [
   'negative_prompt', 'n', 'steps', 'scale', 'sampler', 'seed',
-  'noise_schedule', 'cfg', 'SMEA', 'DYN', 'addition',
+  'noise_schedule', 'cfg_rescale', 'cfg', 'SMEA', 'DYN', 'addition',
 ];
 // 只有 NovelAI 官方上游用的参数，放进 payload.nai（见 novelai.js），不发给 OpenAI 兼容上游
 const NAI_FIELDS = ['qualityToggle', 'ucPreset', 'cfg_rescale', 'sm', 'sm_dyn'];

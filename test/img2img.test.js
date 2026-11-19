@@ -225,12 +225,22 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-/** 假上游：官方的回 ZIP，OpenAI 兼容的回 b64_json；记下请求体，multipart 的另记下各部分名字和 image 部分 */
-function fakeUpstream() {
+/**
+ * 假上游：官方的回 ZIP，OpenAI 兼容的回 b64_json；记下请求体，multipart 的另记下各部分名字和 image 部分，
+ * /images/edits 的记下表单字段。editsStatus 给了就让 /images/edits 回这个状态（比如 404 当没有这个接口）。
+ */
+function fakeUpstream({ editsStatus } = {}) {
   const calls = [];
   globalThis.fetch = async (url, init = {}) => {
     if (String(url).startsWith('http://127.0.0.1')) return realFetch(url, init);
     const call = { url: String(url), token: init.headers?.Authorization, multipart: init.body instanceof FormData };
+    if (/\/images\/edits$/.test(url)) {
+      call.fields = Object.fromEntries([...init.body.entries()].filter(([, value]) => typeof value === 'string'));
+      call.image = Buffer.from(await init.body.get('image').arrayBuffer());
+      calls.push(call);
+      if (editsStatus) return Response.json({ error: { message: 'Invalid URL (POST /v1/images/edits)' } }, { status: editsStatus });
+      return Response.json({ created: 1, data: [{ b64_json: OUT_PNG.toString('base64') }] });
+    }
     if (call.multipart) {
       call.body = JSON.parse(await init.body.get('request').text());
       call.parts = [...init.body.keys()];
@@ -421,12 +431,47 @@ test('额度用完先报额度，不碰参考图；参考图数据坏了报 400�
   assert.equal(calls.length, 1);
 });
 
-test('只有 OpenAI 兼容的上游 → 400 img2img_unsupported；官方秘钥只出免费图 → 400 img2img_not_free；都不发请求', async () => {
+test('OpenAI 兼容的上游：图生图走 /images/edits（multipart，参考图、重绘强度和 NAI 参数都是表单字段）；文生图照常 JSON', async () => {
+  only('兼容');
+  const calls = fakeUpstream();
+  const params = { negative_prompt: 'watermark, text', steps: 17, scale: 4.25, seed: 24681357, sampler: 'k_euler', cfg_rescale: 0.13 };
+  const res = await post('/v1/images/generations', {
+    model: 'nai-diffusion-4-5-full', prompt: 'cat', image: dataUri(testPng(300, 200)), strength: 0.35, noise: 0.1, response_format: 'b64_json', ...params,
+  });
+  assert.equal(res.status, 200);
+  assert.equal((await res.json()).data[0].b64_json, OUT_PNG.toString('base64'));
+  const [edit] = calls;
+  assert.match(edit.url, /^https:\/\/api\.example-upstream\.com\/v1\/images\/edits$/);
+  assert.deepEqual(edit.fields, {
+    model: 'nai-diffusion-4-5-full', prompt: 'cat', negative_prompt: 'watermark, text', steps: '17', scale: '4.25', sampler: 'k_euler',
+    seed: '24681357', cfg_rescale: '0.13', size: '1216x832', strength: '0.35', noise: '0.1', response_format: 'url',
+  });
+  const sent = decodeImage(edit.image);
+  assert.deepEqual([sent.width, sent.height], [1216, 832]); // 按参考图比例出约 1024×1024，参考图缩放成一样大
+  assert.equal(listLogs().items[0].img2img, 0.35);
+
+  // 文生图还是 JSON 的 /images/generations；cfg_rescale 一起转，负面里的 text 不会被改成 text focus
+  assert.equal((await post('/v1/images/generations', { model: 'nai-diffusion-4-5-full', prompt: 'cat', ...params })).status, 200);
+  assert.match(calls[1].url, /\/images\/generations$/);
+  assert.deepEqual([calls[1].body.cfg_rescale, calls[1].body.negative_prompt, calls[1].body.steps], [0.13, 'watermark, text', 17]);
+});
+
+test('OpenAI 兼容的上游没有 /images/edits（404）：图生图换下一把秘钥，不冷却', async () => {
+  const compat = listUpstreamKeys().find((k) => k.name === '兼容');
+  updateUpstreamKey(compat.id, { priority: 9 }); // 先轮到它
+  only('兼容', '官方');
+  const calls = fakeUpstream({ editsStatus: 404 });
+  const res = await post('/v1/images/generations', { model: 'nai-diffusion-4-5-full', prompt: 'cat', image: dataUri(testPng(64, 64)) });
+  assert.equal(res.status, 200);
+  assert.deepEqual(calls.map((c) => (/edits/.test(c.url) ? 'edits' : 'novelai')), ['edits', 'novelai']);
+  const after = listUpstreamKeys().find((k) => k.name === '兼容');
+  assert.equal(after.cooling_until ?? 0, 0);
+  updateUpstreamKey(compat.id, { priority: 0 });
+});
+
+test('只出免费图的官方秘钥 → 400 img2img_not_free；单张太贵报 too_expensive；都不发请求', async () => {
   const calls = fakeUpstream();
   const body = { model: 'nai-diffusion-4-5-full', prompt: 'cat', image: dataUri(testPng(64, 64)) };
-  only('兼容');
-  const compat = await post('/v1/images/generations', body);
-  assert.deepEqual([compat.status, (await compat.json()).error.code], [400, 'img2img_unsupported']);
   only('只出免费');
   const free = await post('/v1/images/generations', body);
   assert.deepEqual([free.status, (await free.json()).error.code], [400, 'img2img_not_free']);
@@ -443,11 +488,7 @@ test('只有 OpenAI 兼容的上游 → 400 img2img_unsupported；官方秘钥�
   const big = await post('/v1/images/generations', { ...body, model: 'nai-diffusion-5-full', size: '2048x2048', steps: 50, strength: 0.99 });
   assert.deepEqual([big.status, (await big.json()).error.code], [400, 'too_expensive']);
   updateUpstreamKey(paid.id, { max_pixels: 1048576, max_steps: 28 });
-  // 两种都有时图生图走官方，文生图照常
-  only('官方', '兼容');
-  assert.equal((await post('/v1/images/generations', body)).status, 200);
-  assert.equal(calls.length, 1);
-  assert.match(calls[0].url, /generate-image/);
+  assert.equal(calls.length, 0);
 });
 
 test('轮到的秘钥出图上限不一样（尺寸和预先缩放的不同）：先放回秘钥、按它的尺寸重新缩放，再排上去发', async () => {

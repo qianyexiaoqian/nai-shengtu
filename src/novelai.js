@@ -1,5 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto';
-import { coverPng } from './imageJobs.js';
+import { coverReference } from './imageJobs.js';
 import { readZip } from './zip.js';
 
 // NovelAI 官方接口：上游类型选“NovelAI 官方”的秘钥（官网 Account Settings 里生成的 pst- 持久令牌）走这里。
@@ -287,12 +287,12 @@ export function novelaiRequest(payload, shape = novelaiShape(payload)) {
 const CACHE_SECRET = randomBytes(32);
 
 /**
- * 把图生图的参考图放进请求：等比居中裁切缩放到出图尺寸（官方要求和 width/height 一样大）的 PNG，见 prepareImage。
+ * 把图生图的参考图放进请求：等比居中裁切缩放到出图尺寸（官方要求和 width/height 一样大）的 PNG，见 imageJobs.js 的 coverReference。
  * V5（multipart）放成单独的一部分，parameters.image 写部分的名字；之前的模型直接放 base64。返回要附带的部分。
  */
 export async function novelaiImageParts(request, payload, shape) {
   if (!payload.img2img) return [];
-  const png = await prepareImage(payload, shape);
+  const png = await coverReference(payload.img2img, shape);
   const b64 = png.toString('base64');
   if (request.parameters.params_version < 4) {
     request.parameters.image = b64;
@@ -303,28 +303,6 @@ export async function novelaiImageParts(request, payload, shape) {
   return [['image', png]];
 }
 
-/**
- * 图生图的参考图按 shape 的出图尺寸缩放成 PNG（在图片线程里做，见 imageJobs.js 的 coverPng，出错也照它抛）。
- * 同一个请求同一个尺寸只做一次，换秘钥重试时直接用。
- */
-export function prepareImage(payload, { width, height }, signal) {
-  const img2img = payload.img2img;
-  const size = `${width}x${height}`;
-  img2img.png ??= new Map();
-  let entry = img2img.png.get(size);
-  if (!entry) {
-    entry = { ready: false };
-    entry.promise = coverPng(img2img.image.bytes, width, height, signal).then((png) => {
-      entry.ready = true;
-      return png;
-    });
-    img2img.png.set(size, entry);
-  }
-  return entry.promise;
-}
-
-/** 这个出图尺寸的参考图缩放好了没有 */
-export const imageReady = (payload, { width, height }) => Boolean(payload.img2img.png?.get(`${width}x${height}`)?.ready);
 
 // NovelAI 格式进来的请求里，这些参数原样带给上游；图生图的参考图由中继缩放后另放，Vibe、角色参考在入口就拦掉了
 const RAW_FIELDS = [

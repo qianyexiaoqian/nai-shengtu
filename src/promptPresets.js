@@ -149,7 +149,8 @@ export const DIRECT_WORDS = new Map([
 export const KEEP_AS_IS = new Set([
   'masterpiece', 'best quality', 'amazing quality', 'great quality', 'good quality', 'normal quality',
   'low quality', 'bad quality', 'worst quality', 'very aesthetic', 'aesthetic', 'displeasing', 'very displeasing',
-  'no text', 'newest', 'recent', 'mid', 'early', 'oldest', 'year 2023', 'year 2024', 'year 2025',
+  // text：Danbooru 把它当 text_focus 的别名，可 NAI 提示词（尤其负面）里写 text 就是“图上的字”，不能改
+  'text', 'no text', 'newest', 'recent', 'mid', 'early', 'oldest', 'year 2023', 'year 2024', 'year 2025',
   ...[...QUALITY_PRESETS, ...NEGATIVE_PRESETS].flatMap((p) => p.text.split(',')),
   ...PRESET_GROUPS.flatMap((g) => g.tags.map(([en]) => en)),
 ].map((w) => w.replace(/[{}[\]]/g, '').trim().toLowerCase()).filter(Boolean));

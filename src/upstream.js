@@ -4,10 +4,11 @@ import { config } from './config.js';
 import { db } from './db.js';
 import { HttpError } from './http.js';
 import { ImageError } from './imageCodec.js';
+import { coverReference, referenceReady } from './imageJobs.js';
 import { applyLimits } from './limits.js';
 import { barUsedSince, markBarUsed, needsFreshBar, noteAccountUsed, refreshAccount } from './naiAccounts.js';
 import {
-  NOVELAI_MODELS, imageReady, novelaiBody, novelaiImageParts, novelaiImages, novelaiRequest, novelaiShape, prepareImage,
+  NOVELAI_MODELS, novelaiBody, novelaiImageParts, novelaiImages, novelaiRequest, novelaiShape,
 } from './novelai.js';
 import { acquireKey, createJob, releaseKey } from './queue.js';
 import { getSettings } from './settings.js';
@@ -18,14 +19,15 @@ import {
 // 这些状态说明是这把上游秘钥的问题（失效、点数不足、不允许该模型、限流），上游没出图也没扣点，换下一把重试。
 // 超时、5xx 不切换：上游可能已经出图扣点，重试会重复扣费。
 const FAILOVER_STATUSES = new Set([401, 402, 403, 429]);
-// 这个上游没有请求的模型（或者接口地址填错了）：同样没出图，换下一把，但不冷却，它接别的模型照样正常
-const isModelMissing = (err) => err.upstreamStatus === 404 || err.code === 'model_not_found';
+// 这个上游没有请求的模型或接口（接口地址填错了、不支持图生图的 /images/edits）：同样没出图，换下一把，
+// 但不冷却，它接别的请求照样正常
+const isModelMissing = (err) => err.upstreamStatus === 404 || err.upstreamStatus === 405 || err.code === 'model_not_found';
 // 上游秘钥用不了时调用方看到的话；原因只进调用日志
 const UNAVAILABLE = '生图失败：服务暂时不可用，请联系管理员';
 
 /**
- * 在支持这个模型的上游秘钥里轮询，按秘钥的类型调它的接口地址（OpenAI 兼容的 /images/generations，
- * 或 NovelAI 官方的 /ai/generate-image），遇到秘钥自身的问题自动换下一把。
+ * 在支持这个模型的上游秘钥里轮询，按秘钥的类型调它的接口地址（OpenAI 兼容的 /images/generations、
+ * 图生图走 /images/edits，或 NovelAI 官方的 /ai/generate-image），遇到秘钥自身的问题自动换下一把。
  * 统一返回 OpenAI 格式：图片在 data[].url（上游地址，不能直接给调用方，见 imageStore.js）或 data[].b64_json 里。
  * 秘钥按优先级和并发上限取，都满了在号池里排队（见 queue.js）；signal 断开时取消排队，info 给后台排队列表显示。
  * 取到秘钥后按它的出图上限压尺寸、步数、张数（见 limits.js），换秘钥时按新秘钥的上限重新算；
@@ -65,7 +67,7 @@ export async function generateImages(payload, { signal, info } = {}) {
       job.tried.delete(key.id);
       continue;
     }
-    if (payload.img2img && !imageReady(payload, plan.shape)) {
+    if (payload.img2img && !referenceReady(payload.img2img, plan.shape)) {
       // 这把秘钥的出图上限让尺寸和预先缩放的不一样：先把秘钥放回去，缩放好了再重新排，不占着它等
       releaseKey(job);
       job.tried.delete(key.id);
@@ -77,9 +79,10 @@ export async function generateImages(payload, { signal, info } = {}) {
     }
     Object.assign(job.info, { size: plan.applied.size, n: plan.applied.n, anlas: plan.applied.anlas, adjusted: plan.applied.changes });
     try {
-      const body = key.type === 'novelai'
-        ? await requestNovelai(key, payload, plan.shape)
-        : await requestGeneration(key, plan.payload);
+      let body;
+      if (key.type === 'novelai') body = await requestNovelai(key, payload, plan.shape);
+      else if (payload.img2img) body = await requestEdit(key, plan.payload, plan.shape);
+      else body = await requestGeneration(key, plan.payload);
       markKeyUsed(key);
       return { body, upstreamKey: key, queueMs: job.queueMs, applied: plan.applied };
     } catch (err) {
@@ -101,23 +104,14 @@ export async function generateImages(payload, { signal, info } = {}) {
 
 /**
  * 现在有没有上游秘钥能接这个请求，没有就给出该报的错：没有能接这个模型的秘钥 → 未配置；
- * 有，但都是官方秘钥、压完上限还是单张超过 140 Anlas → 参数太大；图生图只有 OpenAI 兼容的秘钥能接 → 不支持、
- * 只有“只出免费图”的官方秘钥 → 400；都是“只出免费图”、只是请求超出免费范围 → 400；
+ * 有，但都是官方秘钥、压完上限还是单张超过 140 Anlas → 参数太大；图生图只有“只出免费图”的官方秘钥 → 400；
+ * 都是“只出免费图”、只是请求超出免费范围 → 400；
  * 账号那边的原因（用量条用完、不是 Opus、状态未知）→ 免费额度用不了。
  */
 export function servableError(payload) {
   const plans = candidateKeys(payload.model).map((key) => ({ key, plan: planFor(key, payload) }));
   if (!plans.length) return notConfiguredError(payload.model);
   if (plans.some(({ plan }) => plan.ok)) return null;
-  // 图生图只有 NovelAI 格式的上游（官方或兼容它的中转站）能出；OpenAI 兼容的接口没有图生图
-  const capable = plans.filter(({ plan }) => !plan.unsupported);
-  if (!capable.length) {
-    return new HttpError(400, '当前没有支持图生图的上游，请联系管理员', {
-      code: 'img2img_unsupported',
-      internal: `图生图要 NovelAI 格式的上游秘钥（类型选 NovelAI 官方），能接模型 ${payload.model} 的都是 OpenAI 兼容的`,
-    });
-  }
-  plans.splice(0, plans.length, ...capable);
   const reasons = plans.map(({ key, plan }) => `${key.name || `#${key.id}`}：${plan.anlas.why}，要 ${plan.anlas.total} Anlas`);
   if (plans.every(({ plan }) => plan.anlas.refused)) {
     return new HttpError(400, '尺寸或步数太大了，请调小一些再试', {
@@ -165,7 +159,7 @@ export async function prepareReference(payload, signal) {
 // 参考图缩放失败是这张图的问题、不是秘钥的：按 400 报，不换秘钥；图片线程忙不过来 503；调用方断开 499
 async function referencePng(payload, shape, signal) {
   try {
-    return await prepareImage(payload, shape, signal);
+    return await coverReference(payload.img2img, shape, signal);
   } catch (err) {
     if (err instanceof ImageError) throw new HttpError(400, err.message, { param: 'image', code: 'invalid_image', internal: err.cause && String(err.cause) });
     if (err.code === 'image_busy') {
@@ -198,7 +192,8 @@ const notConfiguredError = (model) => new HttpError(503, '服务暂未就绪，�
  * 按这把秘钥的出图上限定下实际发的尺寸、步数、张数，ok 表示这把秘钥接不接这个请求。
  * 官方的按补上默认值后的实际参数压（没写步数也是 28 步；medium 固定 14 步，不压步数），再按账号状态算 Anlas：
  * 单张超过 140 的不接，“只出免费图”的要花 Anlas 就不接。
- * OpenAI 兼容的只压请求里写了的（没写步数就是上游自己的默认，中继不知道是多少），没写尺寸按 1024x1024 算。
+ * OpenAI 兼容的只压请求里写了的（没写步数就是上游自己的默认，中继不知道是多少），没写尺寸按 1024x1024 算；
+ * shape 里的宽高是图生图参考图要缩放到的尺寸。
  */
 function planFor(key, payload) {
   if (key.type === 'novelai') {
@@ -217,15 +212,13 @@ function planFor(key, payload) {
     };
   }
   const [width, height] = (/^(\d+)x(\d+)$/.exec(payload.size ?? '') ?? [0, 1024, 1024]).slice(1).map(Number);
-  // OpenAI 兼容的上游不能图生图，不接（servableError 给出原因）
-  if (payload.img2img) return { payload, ok: false, unsupported: true, applied: { size: `${width}x${height}`, n: payload.n ?? 1, changes: [] } };
   const wanted = { width, height, steps: payload.steps, n: payload.n ?? 1 };
   const { shape, changes } = applyLimits(wanted, key);
   const sent = { ...payload };
   if (shape.width !== width || shape.height !== height) sent.size = `${shape.width}x${shape.height}`;
   if (shape.steps !== wanted.steps) sent.steps = shape.steps;
   if (shape.n !== wanted.n) sent.n = shape.n;
-  return { payload: sent, ok: true, applied: { size: sent.size ?? `${width}x${height}`, n: shape.n, seed: payload.seed, changes } };
+  return { payload: sent, shape, ok: true, applied: { size: sent.size ?? `${width}x${height}`, n: shape.n, seed: payload.seed, changes } };
 }
 
 /**
@@ -233,10 +226,39 @@ function planFor(key, payload) {
  * 有的上游不认 response_format（比如 gpt-image 系列只给 b64_json），报这个参数错时去掉再请求一次，参数错误不会出图扣点。
  */
 async function requestGeneration(key, { nai: _nai, img2img: _img2img, ...payload }) {
-  let res = await postGeneration(key, { ...payload, response_format: 'url' });
+  return openaiImages((format) => postUpstream(key, '/images/generations', JSON.stringify({ ...payload, ...format }), {
+    'Content-Type': 'application/json',
+  }));
+}
+
+/**
+ * 图生图走 OpenAI 的图片编辑接口 /images/edits（multipart）：参考图按出图尺寸缩放好作为 image 文件，
+ * 重绘强度、加噪和 NAI 扩展参数（步数、引导、采样器、种子、负面……）作为表单字段。
+ * new-api 这类中转会原样转发 multipart 里的字段，JSON 请求里它不认识的字段却会丢掉，所以图生图不用 JSON。
+ * 上游没有这个接口时（404 / 405 / model_not_found）换下一把秘钥。
+ */
+async function requestEdit(key, { nai: _nai, img2img, ...payload }, shape) {
+  const png = await coverReference(img2img, shape);
+  const fields = { ...payload, strength: img2img.strength, noise: img2img.noise };
+  return openaiImages((format) => {
+    const form = new FormData();
+    for (const [name, value] of Object.entries({ ...fields, ...format })) {
+      if (['string', 'number', 'boolean'].includes(typeof value)) form.append(name, String(value));
+    }
+    form.append('image', new Blob([png], { type: 'image/png' }), 'image.png');
+    return postUpstream(key, '/images/edits', form);
+  });
+}
+
+/**
+ * OpenAI 格式的出图请求：send(format) 发一次请求，format 是要加上的 { response_format }。
+ * 优先要链接，上游不认 response_format 时去掉再发一次；返回能用的图片，提示图去掉。
+ */
+async function openaiImages(send) {
+  let res = await send({ response_format: 'url' });
   let body = await res.json().catch(() => null);
   if (res.status === 400 && /response_format/i.test(JSON.stringify(body?.error ?? body?.detail ?? ''))) {
-    res = await postGeneration(key, payload);
+    res = await send({});
     body = await res.json().catch(() => null);
   }
   if (res.ok && !body?.error && !body?.detail && body?.data?.some((item) => item?.url || item?.b64_json)) {
@@ -302,12 +324,12 @@ function withoutHintImages(body) {
   throw err;
 }
 
-async function postGeneration(key, body) {
+async function postUpstream(key, path, body, headers = {}) {
   try {
-    return await fetch(`${key.base_url}/images/generations`, {
+    return await fetch(`${key.base_url}${path}`, {
       method: 'POST',
-      headers: { Authorization: `Bearer ${key.key}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
+      headers: { Authorization: `Bearer ${key.key}`, ...headers },
+      body,
       signal: AbortSignal.timeout(config.timeoutMs),
     });
   } catch (err) {

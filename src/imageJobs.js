@@ -33,6 +33,28 @@ export function coverPng(bytes, width, height, signal) {
   }).then(({ png }) => Buffer.from(png.buffer, png.byteOffset, png.byteLength));
 }
 
+/**
+ * 图生图的参考图按出图尺寸缩放（coverPng），同一个请求同一个尺寸只做一次，换秘钥重试时直接用。
+ * img2img 是请求里的 { image: { bytes }, strength, noise }，缩放结果记在它身上。
+ */
+export function coverReference(img2img, { width, height }, signal) {
+  const size = `${width}x${height}`;
+  img2img.png ??= new Map();
+  let entry = img2img.png.get(size);
+  if (!entry) {
+    entry = { ready: false };
+    entry.promise = coverPng(img2img.image.bytes, width, height, signal).then((png) => {
+      entry.ready = true;
+      return png;
+    });
+    img2img.png.set(size, entry);
+  }
+  return entry.promise;
+}
+
+/** 这个出图尺寸的参考图缩放好了没有 */
+export const referenceReady = (img2img, { width, height }) => Boolean(img2img.png?.get(`${width}x${height}`)?.ready);
+
 function pump() {
   for (const slot of slots) {
     while (!slot.job && waiting.length) start(slot, waiting.shift());
